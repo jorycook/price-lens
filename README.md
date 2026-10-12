@@ -38,11 +38,10 @@ These are mid-market reference rates. What your card or a cash exchange actually
 The camera only works from a secure address: `https://`, or `http://localhost` on a computer.
 
 ```
-cd price-lens
 npx http-server -c-1 .        # then open http://localhost:8080
 ```
 
-To use it on a phone, put the folder on any https host. Every path inside is relative, so a sub-folder works. Options include GitHub Pages, Netlify, Cloudflare Pages, or copying it under `docs/` in this repository, which would serve it at `https://jorycook.github.io/Yaoki/price-lens/`. Then, on the phone:
+To use it on a phone, put the folder on any https host. Every path inside is relative, so a sub-folder works. Options include GitHub Pages, Netlify, Cloudflare Pages, or this repository's own GitHub Pages (Settings → Pages → Deploy from a branch, `main`, folder `/ (root)`), which serves it at `https://jorycook.github.io/price-lens/`. Then, on the phone:
 
 - **iPhone:** open the address in Safari, tap Share, then Add to Home Screen.
 - **Android:** open it in Chrome, open the menu, then tap Install app.
