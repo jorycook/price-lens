@@ -176,13 +176,14 @@ button { cursor: pointer; }
 .sheet-body { padding: 20px 18px calc(var(--safe-bottom) + 18px); }
 .sheet h2 { margin: 0 0 14px; font-size: 20px; }
 .field { display: block; margin-bottom: 18px; }
-.field > span { display: block; font-weight: 600; margin-bottom: 6px; }
+.field > span, .field > label > span { display: block; font-weight: 600; margin-bottom: 6px; }
 .field small { display: block; color: var(--muted); margin-top: 6px; font-size: 13px; }
 .field select, .field input {
   width: 100%; padding: 12px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--card); font-size: 17px;
   -webkit-user-select: text; user-select: text;
 }
+.place-line { margin: 10px 0; font-size: 14px; }
 .rates-detail { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
 .rates-detail a { color: var(--accent); }
 .typer-out { min-height: 60px; margin: 0; font-size: 30px; font-weight: 800; color: var(--accent); }

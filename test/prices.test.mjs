@@ -20,13 +20,13 @@ test('symbols before and after the number', () => {
   assert.deepEqual(top('12.50 CHF'), [12.5, 'CHF']);
   assert.deepEqual(top('29,90 zł'), [29.9, 'PLN']);
   assert.deepEqual(top('149 Kč'), [149, 'CZK']);
-  assert.deepEqual(top('1 290 Ft'), [1290, 'HUF']);
+  assert.deepEqual(top('1 290 Ft', 'HUF'), [1290, 'HUF']);
   assert.deepEqual(top('฿120'), [120, 'THB']);
-  assert.deepEqual(top('49:-'), [49, 'SEK']);
-  assert.deepEqual(top('R25.99'), [25.99, 'ZAR']);
-  assert.deepEqual(top('RM 8.90'), [8.9, 'MYR']);
-  assert.deepEqual(top('Rp 15.000'), [15000, 'IDR']);
-  assert.deepEqual(top('250 TL'), [250, 'TRY']);
+  assert.deepEqual(top('49:-', 'SEK'), [49, 'SEK']);
+  assert.deepEqual(top('R25.99', 'ZAR'), [25.99, 'ZAR']);
+  assert.deepEqual(top('RM 8.90', 'MYR'), [8.9, 'MYR']);
+  assert.deepEqual(top('Rp 15.000', 'IDR'), [15000, 'IDR']);
+  assert.deepEqual(top('250 TL', 'TRY'), [250, 'TRY']);
 });
 
 test('separators: thousands and decimals in the local styles', () => {
@@ -51,7 +51,7 @@ test('shared marks follow the local currency', () => {
   assert.deepEqual(top('$4.99', 'MXN'), [4.99, 'MXN']);
   assert.deepEqual(top('¥68', 'CNY'), [68, 'CNY']);
   assert.deepEqual(top('45 kr', 'NOK'), [45, 'NOK']);
-  assert.deepEqual(top('45 kr'), [45, 'SEK']);
+  assert.deepEqual(top('45 kr', 'SEK'), [45, 'SEK']);
   assert.deepEqual(top('C$ 4.99', 'USD'), [4.99, 'CAD']);
 });
 
@@ -119,8 +119,8 @@ test('ISO codes', () => {
   assert.deepEqual(top('ABC 9.99', 'USD'), [9.99, 'USD']); // not a currency
   assert.deepEqual(top('XYZ 9.99', 'USD'), [9.99, 'USD']);
   assert.deepEqual(top('XYZ 9.99', 'USD'), [9.99, 'USD']);
-  const [p] = findPrices('XYZ 9.99', { local: 'USD', codes: ['USD', 'XYZ'] });
-  assert.equal(p.currency, 'XYZ');
+  const [p] = findPrices('9.99 PEN', { local: 'PEN' }); // a word-like code counts where it is local
+  assert.equal(p.currency, 'PEN');
 });
 
 test('currency from the browser language', () => {
@@ -129,4 +129,48 @@ test('currency from the browser language', () => {
   assert.equal(currencyForLanguage('ja-JP'), 'JPY');
   assert.equal(currencyForLanguage('zh-Hant-TW'), 'TWD');
   assert.equal(currencyForLanguage('fr'), null);
+});
+
+test('signs that are also letters only count where that currency is local', () => {
+  assert.deepEqual(top('R25.99', 'USD'), [25.99, 'USD']); // a stray R is noise in the US
+  assert.deepEqual(top('RM 8.90', 'EUR'), [8.9, 'EUR']);
+  assert.deepEqual(top('45 kr', 'EUR'), null); // with the kr ignored, "45 kr" reads as a count, like "45 bags"
+  assert.deepEqual(findPrices('10 Ft long', { local: 'USD' }), []);
+  assert.deepEqual(top('1 290 Ft', 'HUF'), [1290, 'HUF']);
+});
+
+test('capitalised words are not currency codes', () => {
+  assert.deepEqual(findPrices([{ text: 'ALL 4 SEASONS', height: 1 }], { local: 'USD' }), []);
+  assert.deepEqual(top('TOP 10.00', 'USD'), [10, 'USD']);
+  assert.deepEqual(top('PEN 2.50', 'EUR'), [2.5, 'EUR']);
+});
+
+test('a number with no sign has to look like money', () => {
+  const lines = [
+    { text: '$3.99', height: 40 },
+    { text: 'Aisle 12', height: 10 },
+    { text: 'Item 4471', height: 10 },
+    { text: 'Save 30', height: 12 },
+    { text: '2.49', height: 12 },
+  ];
+  const prices = findPrices(lines, { local: 'USD' });
+  assert.deepEqual(prices.map((p) => p.amount), [3.99, 2.49]);
+  /* yen have no cents, so whole numbers are normal there */
+  assert.deepEqual(findPrices([{ text: '198', height: 40 }, { text: '税込 213', height: 12 }], { local: 'JPY' }).map((p) => p.amount), [198, 213]);
+  /* the biggest text on the tag counts even without cents (US tags often print 499 with small cents) */
+  assert.deepEqual(top([{ text: '499', height: 40 }, { text: 'per lb', height: 10 }], 'USD'), [499, 'USD']);
+});
+
+test('text the reader was unsure of is not trusted without a sign', () => {
+  assert.deepEqual(findPrices([{ text: '7.49', height: 20, confidence: 35 }], { local: 'USD' }), []);
+  assert.equal(findPrices([{ text: '$7.49', height: 20, confidence: 35 }], { local: 'USD' }).length, 1);
+});
+
+test('prices nearer the middle of the box rank higher', () => {
+  const lines = [
+    { text: '$2.99', height: 30, bbox: { x0: 0, y0: 0, x1: 100, y1: 30 } },
+    { text: '$5.49', height: 30, bbox: { x0: 400, y0: 200, x1: 500, y1: 230 } },
+  ];
+  const center = { x: 450, y: 215, reach: 600 };
+  assert.equal(findPrices(lines, { local: 'USD', center })[0].amount, 5.49);
 });

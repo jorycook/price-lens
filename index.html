@@ -94,11 +94,13 @@
       <select id="to-select"></select>
       <small>Every price is shown in this currency.</small>
     </label>
-    <label class="field">
-      <span>Currency on the tags</span>
+    <div class="field">
+      <label for="from-select"><span>Currency on the tags</span></label>
       <select id="from-select"></select>
-      <small id="from-help">Used when a tag shows no currency, or a sign several currencies share ($, ¥, kr). On "Automatic" it follows the last tag that named its currency.</small>
-    </label>
+      <small id="from-help">Used when a tag shows no currency sign, or a sign several currencies share ($, ¥, kr).</small>
+      <p id="place-line" class="place-line"></p>
+      <button id="gps-btn" class="secondary" type="button">Find my country with GPS</button>
+    </div>
     <div class="field">
       <span>Exchange rates</span>
       <p id="rates-detail" class="rates-detail"></p>

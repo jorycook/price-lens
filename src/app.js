@@ -1,13 +1,14 @@
 /* Price Lens: the page. Camera, scanning, and showing the converted prices. */
 
-import { findPrices, currencyForLanguage, resolveMark } from './prices.js';
+import { findPrices, currencyForLanguage, priceKey } from './prices.js';
+import { COUNTRY_CURRENCY, countryName, countryFromTimeZone, countryFromGps, gpsAllowed } from './location.js';
 import { getRates, storedRates, convert, rateOf } from './rates.js';
 import { getReader, readLines } from './ocr.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
   stage: $('stage'), video: $('video'), still: $('still'), reticle: $('reticle'), labels: $('labels'), hint: $('hint'),
-  fromCode: $('from-code'), fromLabel: $('from-label'), toCode: $('to-code'),
+  fromCode: $('from-code'), fromLabel: $('from-label'), placeLine: $('place-line'), gpsBtn: $('gps-btn'), toCode: $('to-code'),
   resultEmpty: $('result-empty'), resultMain: $('result-main'), converted: $('converted'), original: $('original'),
   assumed: $('assumed'), others: $('others'), ratesLine: $('rates-line'),
   shutter: $('shutter'), shutterLabel: $('shutter-label'), liveBtn: $('live-btn'),
@@ -22,11 +23,16 @@ const SETTINGS_KEY = 'price-lens:settings';
 const lang = navigator.language || 'en-US';
 const guess = currencyForLanguage(lang) || 'USD';
 const settings = Object.assign(
-  { to: guess, from: 'auto', learned: guess === 'USD' ? 'EUR' : 'USD' },
+  { to: guess, from: 'auto' },
   (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } })(),
 );
+delete settings.learned; // from an earlier version, which guessed the tag currency from the tags themselves
 const saveSettings = () => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} };
-const tagCurrency = () => (settings.from === 'auto' ? settings.learned : settings.from);
+
+/* Where the phone is: { country, currency, source: 'GPS' | 'time zone' }. On "Automatic", price tags
+   are read in this country's currency. Set from the time zone at once, then from GPS if allowed. */
+const place = { country: null, currency: null, source: null };
+const tagCurrency = () => (settings.from === 'auto' ? place.currency || guess : settings.from);
 
 /* ---------- state ---------- */
 
@@ -40,6 +46,11 @@ const state = {
   busy: false,
   prices: [],
   pick: 0,
+  pickKey: null,      // the price shown big; in live mode it stays while it is in view
+  locked: false,      // the person tapped a price to choose it
+  history: [],        // live mode: the prices seen in the last few frames
+  lines: null,
+  region: null,
   wakeLock: null,
 };
 
@@ -181,6 +192,11 @@ function unfreeze() {
   updateShutter();
 }
 
+function readPrices(lines, region) {
+  const center = region && { x: region.x + region.w / 2, y: region.y + region.h / 2, reach: Math.hypot(region.w, region.h) / 2 };
+  return findPrices(lines, { local: tagCurrency(), codes: knownCodes(), center });
+}
+
 async function scan({ quiet = false } = {}) {
   if (state.busy) return null;
   const [sw] = sourceSize();
@@ -194,18 +210,23 @@ async function scan({ quiet = false } = {}) {
     if (region.w < 20 || region.h < 20) return null;
     const lines = await readLines(source(), region);
     state.lines = lines;
-    const prices = findPrices(lines, { local: tagCurrency(), codes: knownCodes() });
-    learnFrom(prices);
-    if (prices.length) {
-      state.prices = prices;
-      state.pick = 0;
-      setHint('');
-    } else if (!quiet) {
-      setHint(lines.length ? 'No price found. Move closer so the price fills the box.' : 'No text found. Move closer, and keep the tag flat and well lit.');
+    state.region = region;
+    let prices = readPrices(lines, region);
+    if (state.live) {
+      prices = steady(prices);
+    } else {
+      state.pickKey = prices[0] ? priceKey(prices[0]) : null;
+      state.locked = false;
     }
-    if (prices.length || !quiet) {
+    if (prices && prices.length) {
+      state.prices = prices;
+      setHint('');
       render();
       drawLabels(prices);
+    } else if (!quiet) {
+      setHint(lines.length ? 'No price found. Move closer so the price fills the box.' : 'No text found. Move closer, and keep the tag flat and well lit.');
+      render();
+      drawLabels([]);
     }
     return prices;
   } catch (err) {
@@ -219,25 +240,46 @@ async function scan({ quiet = false } = {}) {
   }
 }
 
-/* On "Automatic", a tag that names its currency outright (€, £, CHF, a code) sets the currency
-   assumed for tags that show none, and for shared signs like $ and ¥. */
-function learnFrom(prices) {
-  if (settings.from !== 'auto') return;
-  const sure = prices.find((p) => p.explicit && !p.shared);
-  if (sure && sure.currency !== settings.learned) {
-    settings.learned = sure.currency;
-    saveSettings();
-    updatePills();
-    reassume(prices);
+/* Live mode reads a frame every half second or so, and the reader does not see exactly the same
+   numbers each time. So a price only appears once it has been read in 2 of the last 4 frames, and
+   the price shown big stays until it has left the picture, rather than jumping to whichever number
+   scored best in the latest frame. Returns the prices to show, or null to leave the screen as it is. */
+const FRAMES = 4;
+function steady(prices) {
+  state.history.push(new Set(prices.slice(0, 5).map(priceKey)));
+  if (state.history.length > FRAMES) state.history.shift();
+  const hits = (key) => state.history.filter((frame) => frame.has(key)).length;
+  const confirmed = prices.filter((p) => hits(priceKey(p)) >= 2);
+  const current = state.pickKey;
+  const recent = (n) => current && state.history.slice(-n).some((frame) => frame.has(current));
+  let main = confirmed.find((p) => priceKey(p) === current);
+  if (!main) {
+    /* the price shown was missed in this frame but seen just before (or chosen by a tap): hold it */
+    if (recent(state.locked ? FRAMES : 2)) return null;
+    main = confirmed[0];
+    state.locked = false;
   }
+  if (!main) return null;
+  state.pickKey = priceKey(main);
+  return [main, ...confirmed.filter((p) => p !== main)];
 }
 
-/* prices with no currency sign, or a shared one, follow the currency assumed for the tags */
-function reassume(prices) {
-  for (const p of prices) {
-    if (!p.explicit) p.currency = tagCurrency();
-    else if (p.shared) p.currency = resolveMark(p.mark, tagCurrency());
-  }
+/* the person tapped a price: show it big, and in live mode keep it while it is in view */
+function choose(p) {
+  state.pickKey = priceKey(p);
+  state.locked = true;
+  render();
+  drawLabels(state.prices);
+}
+
+/* after the tag currency changes, read the last scan's text again under the new assumption */
+function rereadLast() {
+  state.history = [];
+  if (!state.lines) return;
+  state.prices = readPrices(state.lines, state.region);
+  if (!state.prices.some((p) => priceKey(p) === state.pickKey)) state.pickKey = state.prices[0] ? priceKey(state.prices[0]) : null;
+  render();
+  drawLabels(state.prices);
 }
 
 /* ---------- live mode: keep reading the moving picture ---------- */
@@ -247,13 +289,14 @@ async function liveLoop() {
   while (state.live && state.stream && !document.hidden) {
     const found = await scan({ quiet: true });
     if (found && found.length) misses = 0;
-    else if (++misses >= 4) { el.labels.replaceChildren(); }
-    await new Promise((r) => setTimeout(r, 350));
+    else if (++misses >= FRAMES) { el.labels.replaceChildren(); state.pickKey = null; state.locked = false; }
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
 
 async function setLive(on) {
   state.live = on;
+  state.history = [];
   el.liveBtn.setAttribute('aria-pressed', String(on));
   if (on) {
     unfreeze();
@@ -307,6 +350,7 @@ async function usePhoto(file) {
 /* ---------- showing results ---------- */
 
 function render() {
+  state.pick = Math.max(0, state.prices.findIndex((q) => priceKey(q) === state.pickKey));
   const p = state.prices[state.pick];
   el.resultEmpty.hidden = !!p;
   el.resultMain.hidden = !p;
@@ -327,7 +371,7 @@ function render() {
     b.innerHTML = '<b></b><span></span>';
     b.firstChild.textContent = money(q.amount, q.currency);
     b.lastChild.textContent = '→ ' + money(c, settings.to);
-    b.addEventListener('click', () => { state.pick = i; render(); drawLabels(state.prices); });
+    b.addEventListener('click', () => choose(q));
     el.others.appendChild(b);
   });
   renderRates();
@@ -360,7 +404,7 @@ function drawLabels(prices) {
     while (placed.some((q) => Math.abs(q.x - x) < 110 && Math.abs(q.y - y) < 34)) y += 36;
     placed.push({ x, y });
     Object.assign(tag.style, { left: x + 'px', top: y + 'px' });
-    tag.addEventListener('click', () => { state.pick = i; render(); drawLabels(state.prices); });
+    tag.addEventListener('click', () => choose(p));
     el.labels.appendChild(tag);
   });
 }
@@ -425,7 +469,7 @@ function fillSelects() {
   const popular = POPULAR.filter((c) => codes.includes(c));
   el.toSelect.replaceChildren(group('Common', popular), group('All currencies', codes));
   el.toSelect.value = settings.to;
-  const auto = new Option(`Automatic (now ${settings.learned})`, 'auto');
+  const auto = new Option(place.currency ? `Automatic: where I am (${place.currency})` : 'Automatic: where I am', 'auto');
   el.fromSelect.replaceChildren(auto, group('Common', popular), group('All currencies', codes));
   el.fromSelect.value = settings.from;
 }
@@ -433,7 +477,40 @@ function fillSelects() {
 function updatePills() {
   el.toCode.textContent = settings.to;
   el.fromCode.textContent = tagCurrency();
-  el.fromLabel.textContent = settings.from === 'auto' ? 'Tag · auto' : 'Tag';
+  el.fromLabel.textContent = settings.from === 'auto' && place.country ? `Tag · ${place.country}` : 'Tag';
+  el.placeLine.textContent = place.country
+    ? `You're in ${countryName(place.country, lang)} (from ${place.source === 'GPS' ? 'GPS' : "your phone's time zone"}), so on Automatic, tags are read in ${place.currency}.`
+    : `Your location isn't known, so on Automatic, tags are read in ${tagCurrency()}.`;
+}
+
+/* ---------- where the phone is ---------- */
+
+function setPlace(country, source) {
+  const currency = COUNTRY_CURRENCY[country];
+  if (!currency) return;
+  const changed = currency !== place.currency;
+  Object.assign(place, { country, currency, source });
+  updatePills();
+  fillSelects();
+  if (changed && settings.from === 'auto') rereadLast();
+}
+
+/* ask: the person tapped the button, so a permission prompt is expected; otherwise only use GPS
+   when it was allowed before */
+async function locateByGps(ask) {
+  if (!ask && !(await gpsAllowed())) return;
+  const btn = el.gpsBtn;
+  btn.disabled = true;
+  btn.textContent = 'Finding your country…';
+  try {
+    setPlace(await countryFromGps(), 'GPS');
+    btn.textContent = 'Found by GPS';
+  } catch (err) {
+    btn.textContent = 'Find my country with GPS';
+    if (ask) el.placeLine.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 el.toSelect.addEventListener('change', () => {
@@ -443,8 +520,7 @@ el.toSelect.addEventListener('change', () => {
 el.fromSelect.addEventListener('change', () => {
   settings.from = el.fromSelect.value;
   saveSettings(); updatePills();
-  reassume(state.prices);
-  render(); drawLabels(state.prices);
+  rereadLast();
 });
 
 /* ---------- typing a price ---------- */
@@ -504,6 +580,10 @@ window.addEventListener('online', () => refreshRates());
 
 /* ---------- start ---------- */
 
+const zoneCountry = countryFromTimeZone();
+if (zoneCountry) setPlace(zoneCountry, 'time zone');
+locateByGps(false);
+el.gpsBtn.addEventListener('click', () => locateByGps(true));
 updatePills();
 fillSelects();
 render();
@@ -519,4 +599,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 
 /* for the tests */
-window.priceLens = { state, settings, scan, usePhoto };
+window.priceLens = { state, settings, place, scan, usePhoto };

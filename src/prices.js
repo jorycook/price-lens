@@ -40,6 +40,11 @@ const THREE_DECIMALS = new Set(['KWD', 'BHD', 'OMR', 'JOD', 'TND', 'LYD', 'IQD']
 
 /* Marks that are a single letter (R, Q) are only trusted before the number, never after it. */
 const WEAK_MARKS = new Set(['R', 'Q']);
+/* Marks that are also ordinary letters or abbreviations ("Ft" is feet, "RM" a room, "S/M" a size,
+   a stray "R" is OCR noise). They only count where that currency is the local one; elsewhere the
+   number is read as if it had no mark. */
+const LOCAL_ONLY = new Set(['R', 'Q', 'Rs', 'Rs.', 'TL', 'Dh', 'Dhs', 'Bs', 'Fr.', 'kn', 'lei', 'Ft', 'RM',
+  'S/', 'S/.', 'zl', 'Kc', ':-', 'Rp', 'Rp.', 'kr', 'kr.', 'B$', 'J$']);
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const markList = Object.keys(MARKS).sort((a, b) => b.length - a.length);
@@ -48,11 +53,12 @@ const markList = Object.keys(MARKS).sort((a, b) => b.length - a.length);
 const NUM = String.raw`\d{1,3}(?:[.,    '’]\d{3})+(?:[.,]\d{1,3})?|\d+(?:[.,]\d{1,3})?`;
 const DASH_END = String.raw`(?:[.,][-–—]{1,2})?`; // "12,-" and "12.–" mean twelve, no cents
 
-/* ISO codes are matched as any three capital letters; whether they are a real currency is decided
-   by the list of codes the exchange rates know about (or a built-in list when none is given). */
+/* ISO codes are matched as any three capital letters next to a number. Only these common codes count,
+   plus the local currency's own code: many other codes are also English words printed on packs in
+   capitals (ALL, TOP, CUP, PEN, GEL, MAD, BOB), and would turn "PEN 2" into Peruvian soles. */
 const COMMON_CODES = new Set(('USD EUR JPY GBP CNY AUD CAD CHF HKD SGD SEK NOK DKK ISK NZD KRW INR MXN BRL ZAR TRY ' +
-  'RUB PLN CZK HUF RON BGN ILS AED SAR QAR KWD BHD OMR JOD EGP MAD TND THB VND IDR MYR PHP TWD PKR LKR NPR ' +
-  'BDT ARS CLP COP PEN UYU BOB PYG CRC GTQ DOP JMD TTD UAH KZT GEL AZN NGN GHS KES TZS UGX ETB XOF XAF ISK HRK').split(' '));
+  'RUB PLN CZK HUF RON BGN ILS AED SAR QAR KWD BHD OMR JOD EGP TND THB VND IDR MYR PHP TWD PKR LKR NPR ' +
+  'BDT ARS CLP COP UYU PYG CRC GTQ DOP JMD TTD UAH KZT AZN NGN GHS KES TZS UGX ETB XOF XAF RSD').split(' '));
 
 /* Text right after the number that means it is not a price: a weight, a volume, a percentage, a time, a count. */
 const NOT_PRICE_AFTER = /^\s?(?:%|kg\b|g\b|gr\b|mg\b|lbs?\b|oz\b|ml\b|cl\b|l\b|ltr\b|cm\b|mm\b|m\b|km\b|pcs\b|pc\b|pk\b|x\b|st\b|stk\b|h\b|min\b|°|:\d|\/\d|[-./]\d{1,2}[-./]\d)/i;
@@ -111,10 +117,12 @@ const AFTER_RE = new RegExp(`^\\s?(?:(?<mark>${MARK_RE})|(?<code>[A-Z]{3}\\b))`,
 
 /* Finds every price in one line of text.
  * options.local: the currency to assume when the tag shows none, and to settle shared marks ($, kr, ¥).
- * options.codes: the currency codes to accept (defaults to a built-in list of common ones). */
+ * options.codes: the currency codes there are rates for; codes outside it are not read as currencies. */
 export function findPricesInLine(line, options = {}) {
   const { local = null } = options;
-  const codes = options.codes ? new Set(options.codes) : COMMON_CODES;
+  const known = options.codes ? new Set(options.codes) : null;
+  const codes = new Set([...COMMON_CODES, ...(local ? [local] : [])].filter((c) => !known || known.has(c)));
+  const markOk = (word) => !LOCAL_ONLY.has(word) || (local && MARKS[word].includes(local));
   const text = cleanDigits(line);
   const found = [];
   const numRe = new RegExp(`(?<![\\d.,])(?:${NUM})${DASH_END}(?![\\d])`, 'g');
@@ -132,7 +140,7 @@ export function findPricesInLine(line, options = {}) {
       const markStart = start - b[0].length;
       /* a mark that is the tail of a longer word ("Paris 12" is not R12, "Prs 5" is not Rs 5) does not count */
       const glued = markStart > 0 && /[\p{L}]/u.test(text[markStart - 1]);
-      if (!glued && b.groups.mark) { mark = word; }
+      if (!glued && b.groups.mark && markOk(word)) { mark = word; }
       else if (!glued && b.groups.code && codes.has(word)) { mark = word; currency = word; }
       if (mark) { side = 'before'; markText = b[0]; }
     }
@@ -143,7 +151,7 @@ export function findPricesInLine(line, options = {}) {
         const nextChar = text[end + a[0].length] || '';
         /* "12 kroner" is a word that starts like a mark; a mark is only a mark when the word ends there */
         const runsOn = /[\p{L}]/u.test(nextChar) && !/[.$]$/.test(word);
-        if (!runsOn && a.groups.mark && !WEAK_MARKS.has(word)) { mark = word; }
+        if (!runsOn && a.groups.mark && !WEAK_MARKS.has(word) && markOk(word)) { mark = word; }
         else if (!runsOn && a.groups.code && codes.has(word)) { mark = word; currency = word; }
         if (mark) { side = 'after'; markText = a[0]; }
       }
@@ -176,17 +184,35 @@ export function findPricesInLine(line, options = {}) {
 }
 
 /* Finds the prices on a whole tag and puts the likeliest first.
- * lines: an array of { text, height } (height: the size of the letters, in any unit), or plain text.
- * The likeliest price is the one in the biggest letters, with a currency mark if any line has one. */
+ * lines: an array of { text, height, bbox?, confidence? } (height: the size of the letters, in any
+ * unit; confidence: the reader's 0–100), or plain text.
+ * options.center: { x, y, reach } in bbox units: where the person is aiming. Prices near it rank higher.
+ *
+ * The likeliest price is the one in the biggest letters, with a currency mark, near the middle of the
+ * box. A number with no mark has to look like money to be kept at all: cents in the local style, or
+ * the biggest text on the tag, or (for currencies without cents, like yen) a number of 10 or more. */
 export function findPrices(lines, options = {}) {
   if (typeof lines === 'string') lines = lines.split(/\r?\n/).map((text) => ({ text, height: 1 }));
+  const { local = null, center = null } = options;
   const all = [];
   const tallest = Math.max(1, ...lines.map((l) => l.height || 1));
+  const noCents = local && NO_DECIMALS.has(local);
   lines.forEach((line, lineIndex) => {
+    const confidence = line.confidence ?? 100;
     for (const p of findPricesInLine(line.text || '', options)) {
       const size = (line.height || 1) / tallest;
-      const hasCents = /[.,]\d{2}$/.test(p.text.replace(/\s?\D+$/, ''));
-      p.score = size * 2 + (p.explicit ? 1.5 : 0) + (hasCents ? 0.3 : 0) - (p.shared ? 0.1 : 0);
+      const digits = p.text.replace(/\s?\D+$/, '').replace(/^\D+/, '');
+      const hasCents = /[.,]\d{2}$/.test(digits);
+      if (!p.explicit) {
+        const moneyLike = (hasCents && !noCents) || size >= 0.8 || (noCents && p.amount >= 10);
+        if (!moneyLike || confidence < 50) continue;
+      } else if (confidence < 30) continue;
+      let near = 0;
+      if (center && line.bbox) {
+        const cx = (line.bbox.x0 + line.bbox.x1) / 2, cy = (line.bbox.y0 + line.bbox.y1) / 2;
+        near = Math.max(0, 1 - Math.hypot(cx - center.x, cy - center.y) / center.reach);
+      }
+      p.score = size * 2 + (p.explicit ? 1.5 : 0) + (hasCents ? 0.3 : 0) - (p.shared ? 0.1 : 0) + near * 0.8 + confidence / 200;
       p.line = lineIndex;
       p.bbox = line.bbox || null;
       all.push(p);
@@ -202,6 +228,9 @@ export function findPrices(lines, options = {}) {
     return true;
   });
 }
+
+/* A short name for a price that stays the same from one camera frame to the next. */
+export const priceKey = (p) => `${p.currency} ${p.amount.toFixed(2)}`;
 
 /* A first guess at the person's own currency, from the region in the browser's language (en-US → USD). */
 export const REGION_CURRENCY = {

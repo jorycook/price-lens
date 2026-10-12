@@ -106,6 +106,7 @@ export async function readLines(source, region) {
       return {
         text: l.text.trim(),
         height: height / scale,
+        confidence: l.confidence,
         bbox: {
           x0: region.x + l.bbox.x0 / scale,
           y0: region.y + l.bbox.y0 / scale,

@@ -86,7 +86,7 @@ const maker = await chromium.launch({ args: proxyArgs });
   await writeFile(join(OUT, 'tag-eur.png'), png);
 
   const browser = await chromium.launch({ args: proxyArgs });
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: 'en-US' });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: 'en-US', timezoneId: 'America/New_York' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('page error:', e.message));
   page.on('console', (m) => m.type() !== 'log' && console.log('console:', m.text()));
@@ -128,7 +128,8 @@ const maker = await chromium.launch({ args: proxyArgs });
     <div style="width:440px;margin:0 auto;background:#fff;border:3px solid #c00;padding:18px 0;text-align:center;border-radius:10px">
     <div style="font-size:26px">Earl Grey Tea 80 bags</div>
     <div style="font-size:100px;font-weight:bold">£3.49</div>
-    <div style="font-size:20px">£4.36 per 100g</div></div></div>`, W, H);
+    <div style="font-size:20px">£4.36 per 100g</div>
+    <div style="font-size:18px;margin-top:8px">Aisle 12 &nbsp; Item 4471 &nbsp; Save 30</div></div></div>`, W, H);
   await writeFile(join(OUT, 'tag-gbp.png'), png);
   const video = join(OUT, 'tag-gbp.y4m');
   await writeFile(video, y4m(rgba, W, H));
@@ -136,7 +137,7 @@ const maker = await chromium.launch({ args: proxyArgs });
   const browser = await chromium.launch({
     args: [...proxyArgs, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`],
   });
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: 'en-GB', permissions: ['camera'] });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: 'en-GB', timezoneId: 'Europe/London', permissions: ['camera'] });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('page error:', e.message));
   page.on('console', (m) => m.type() !== 'log' && console.log('console:', m.text()));
@@ -156,22 +157,62 @@ const maker = await chromium.launch({ args: proxyArgs });
     lines: window.priceLens.state.lines.map((l) => l.text),
     prices: window.priceLens.state.prices.map((p) => [p.amount, p.currency]),
     converted: document.getElementById('converted').textContent,
-    learned: document.getElementById('from-code').textContent,
+    tagPill: document.getElementById('from-label').textContent + ' ' + document.getElementById('from-code').textContent,
     hint: document.getElementById('hint').textContent,
   }));
   console.log('  ', JSON.stringify(r));
   check(r.prices[0]?.[0] === 3.49 && r.prices[0]?.[1] === 'GBP', 'camera: reads £3.49 as the main price');
   check(/[¥￥]\s?[\d,]+$/.test(r.converted), 'camera: shows it in yen');
-  check(r.learned === 'GBP', 'camera: learns that tags here are in pounds');
+  check(r.tagPill === 'Tag · GB GBP', 'camera: knows from the time zone that tags here are in pounds');
+  check(!r.prices.some(([a]) => [12, 4471, 30].includes(a)), 'camera: aisle, item and "save 30" numbers are not prices');
   await page.screenshot({ path: join(OUT, 'camera.png') });
 
   /* live mode keeps reading */
   await page.click('#shutter'); // back to the moving picture
   await page.click('#live-btn');
-  await page.evaluate(() => { window.priceLens.state.prices = []; });
+  await page.evaluate(() => { window.priceLens.state.prices = []; window.priceLens.state.pickKey = null; });
   await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 60000 }).catch(() => {});
-  const live = await page.evaluate(() => window.priceLens.state.prices[0]?.amount);
-  check(live === 3.49, 'live: reads the price again on its own');
+  /* then watch the big price for a few seconds: it should stay put */
+  const shown = [];
+  for (let i = 0; i < 12; i++) {
+    shown.push(await page.textContent('#original'));
+    await page.waitForTimeout(400);
+  }
+  console.log('   live:', [...new Set(shown)].join(' | '));
+  check(shown[0].startsWith('£3.49'), 'live: reads the price on its own');
+  check(new Set(shown).size === 1, 'live: the price shown stays steady over 5 seconds');
+  await browser.close();
+}
+
+/* ---------- 3. GPS beats the time zone: phone still on London time, but in Tokyo ---------- */
+{
+  const { png } = await drawTag(maker, tagHtml(`
+    <div style="font-size:30px">Matcha Kit Kat</div>
+    <div style="font-size:120px;font-weight:bold">298</div>`), 900, 700);
+  const browser = await chromium.launch({ args: proxyArgs });
+  const ctx = await browser.newContext({
+    ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-US', timezoneId: 'Europe/London',
+    permissions: ['geolocation'], geolocation: { latitude: 35.68, longitude: 139.69 },
+  });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.goto(base);
+  await page.waitForFunction(() => window.priceLens?.place.source === 'GPS', null, { timeout: 20000 }).catch(() => {});
+  const where = await page.evaluate(() => ({ ...window.priceLens.place }));
+  console.log('  ', JSON.stringify(where));
+  check(where.country === 'JP' && where.currency === 'JPY', 'GPS: finds Japan although the clock is on London time');
+  await page.waitForFunction(() => window.priceLens.state.table, null, { timeout: 20000 });
+  await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 90000 }).catch(() => {});
+  const r = await page.evaluate(() => ({
+    prices: window.priceLens.state.prices.map((p) => [p.amount, p.currency]),
+    converted: document.getElementById('converted').textContent,
+    line: document.getElementById('place-line').textContent,
+  }));
+  console.log('  ', JSON.stringify(r));
+  check(r.prices[0]?.[0] === 298 && r.prices[0]?.[1] === 'JPY', 'GPS: a tag with no sign is read in yen');
+  check(/^\$\d+\.\d\d$/.test(r.converted), 'GPS: and shown in dollars');
+  check(/Japan \(from GPS\)/.test(r.line), 'GPS: settings say where you are and how it was found');
   await browser.close();
 }
 
