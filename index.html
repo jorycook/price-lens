@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Price Lens</title>
+<meta name="description" content="Point your phone's camera at a price tag and see the price in your own currency, at today's exchange rate.">
+<meta name="theme-color" content="#0E1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Price Lens">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+
+<!-- the camera view, or a still photo, fills the screen; labels sit on top of the prices found -->
+<main id="stage" class="stage" aria-label="Camera">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="still" hidden></canvas>
+  <div id="reticle" class="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <div id="labels" class="labels"></div>
+  <p id="hint" class="hint" role="status" aria-live="polite"></p>
+</main>
+
+<header class="top">
+  <button id="from-btn" class="pill" type="button" aria-label="Currency on the tags">
+    <span class="pill-label" id="from-label">Tag</span><b id="from-code">…</b>
+  </button>
+  <span class="arrow" aria-hidden="true">→</span>
+  <button id="to-btn" class="pill pill-strong" type="button" aria-label="Your currency">
+    <span class="pill-label">Mine</span><b id="to-code">…</b>
+  </button>
+  <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm7.43-2.53a7.8 7.8 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.68-.97l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.38 2.65c-.6.25-1.17.57-1.68.97l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.8 7.8 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.3.61.22l2.49-1c.51.4 1.08.72 1.68.97l.38 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.38-2.65c.6-.25 1.17-.57 1.68-.97l2.49 1c.22.08.48 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65Z"/></svg>
+  </button>
+</header>
+
+<section id="panel" class="panel" aria-label="Result">
+  <div id="result" class="result" aria-live="polite">
+    <p class="result-empty" id="result-empty">Aim the box at a price.</p>
+    <div class="result-main" id="result-main" hidden>
+      <p class="converted" id="converted"></p>
+      <p class="original"><span id="original"></span> <span class="assumed" id="assumed" hidden>currency assumed</span></p>
+    </div>
+    <div class="others" id="others"></div>
+  </div>
+  <p class="rates-line" id="rates-line"></p>
+  <div class="controls">
+    <label class="ctrl" title="Choose a photo">
+      <input id="photo-input" type="file" accept="image/*" hidden>
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M19 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 12H5l3.5-4.5 2.5 3 3.5-4.5L19 17ZM8 10.5A1.5 1.5 0 1 0 8 7.5a1.5 1.5 0 0 0 0 3Z"/></svg>
+      <span>Photo</span>
+    </label>
+    <button id="shutter" class="shutter" type="button" aria-label="Read the price">
+      <span class="shutter-ring"></span><span class="shutter-label" id="shutter-label">Scan</span>
+    </button>
+    <button id="live-btn" class="ctrl" type="button" aria-pressed="false" title="Keep reading">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 3a5 5 0 1 1 0 10 5 5 0 0 1 0-10Zm0 2.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"/></svg>
+      <span>Live</span>
+    </button>
+    <button id="type-btn" class="ctrl" type="button" title="Type a price">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M20 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-9 3h2v2h-2V8Zm0 3h2v2h-2v-2ZM8 8h2v2H8V8Zm0 3h2v2H8v-2ZM5 8h2v2H5V8Zm0 3h2v2H5v-2Zm11 5H8v-2h8v2Zm0-3h-2v-2h2v2Zm0-3h-2V8h2v2Zm3 3h-2v-2h2v2Zm0-3h-2V8h2v2Z"/></svg>
+      <span>Type</span>
+    </button>
+  </div>
+</section>
+
+<!-- first visit, or when the camera cannot start -->
+<section id="intro" class="intro">
+  <div class="intro-card">
+    <img src="icons/icon.svg" alt="" width="72" height="72">
+    <h1>Price Lens</h1>
+    <p>Point your camera at a price tag. Price Lens reads the price and shows it in your currency, at today's exchange rate.</p>
+    <p class="small">The text is read on your phone; pictures never leave it. Rates come from a free public source once an hour.</p>
+    <button id="start-btn" class="primary" type="button">Start camera</button>
+    <p class="intro-error" id="intro-error" role="alert" hidden></p>
+    <div class="intro-alt">
+      <label class="link-btn"><input id="photo-input-2" type="file" accept="image/*" hidden>Use a photo instead</label>
+      <button id="type-btn-2" class="link-btn" type="button">Type a price</button>
+    </div>
+  </div>
+</section>
+
+<!-- settings and currency choice -->
+<dialog id="settings" class="sheet">
+  <form method="dialog" class="sheet-body">
+    <h2>Settings</h2>
+    <label class="field">
+      <span>My currency</span>
+      <select id="to-select"></select>
+      <small>Every price is shown in this currency.</small>
+    </label>
+    <label class="field">
+      <span>Currency on the tags</span>
+      <select id="from-select"></select>
+      <small id="from-help">Used when a tag shows no currency, or a sign several currencies share ($, ¥, kr). On "Automatic" it follows the last tag that named its currency.</small>
+    </label>
+    <div class="field">
+      <span>Exchange rates</span>
+      <p id="rates-detail" class="rates-detail"></p>
+      <button id="refresh-btn" class="secondary" type="button">Fetch the latest rates</button>
+    </div>
+    <p class="small">Rates are mid-market reference rates. Card and cash rates differ by your bank's fee.</p>
+    <button class="primary" value="close">Done</button>
+  </form>
+</dialog>
+
+<dialog id="typer" class="sheet">
+  <form method="dialog" class="sheet-body" id="typer-form">
+    <h2>Type a price</h2>
+    <label class="field">
+      <span>Price, as on the tag</span>
+      <input id="typer-input" inputmode="decimal" autocomplete="off" placeholder="e.g. €12,50 or 1.980" enterkeyhint="done">
+    </label>
+    <p class="typer-out" id="typer-out" aria-live="polite"></p>
+    <button class="primary" value="close">Done</button>
+  </form>
+</dialog>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

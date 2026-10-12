@@ -1,0 +1,63 @@
+# Price Lens
+
+Point your phone's camera at a price tag. Price Lens reads the price and shows it in your currency at the current exchange rate.
+
+It's a web app with no build step. Open it in Safari or Chrome on a phone and add it to the home screen, and it then works like an installed app, offline included.
+
+## How it works
+
+1. **Camera.** The back camera fills the screen and you aim the box at a price. **Scan** freezes the frame and reads it. **Live** keeps reading while you move the phone, and labels each price in place. **Photo** reads a picture you already have. **Type** converts a price you type in.
+2. **Reading the text.** [Tesseract](https://github.com/naptha/tesseract.js) runs on the phone, compiled to WebAssembly, so pictures never leave the device. The first scan downloads the reader and its English model (about 4 MB). After that it's stored on the phone.
+3. **Finding the price** (`src/prices.js`). This step handles:
+   - currency signs before or after the number (`€12,50`, `12.50 CHF`, `1,980円`, `R$ 49,90`, `49:-`), plus ISO codes
+   - thousands and decimal separators in every local style: `1,234.56`, `1.234,56`, `1 234,56`, `12'500`, `12,-`
+   - currencies that have no cents (`¥1.980` is 1980)
+   - common misreadings (O for 0, l for 1)
+   - weights, volumes, percentages, dates, times, article numbers, barcodes and counts ("80 bags"), which it skips
+
+   When a tag shows several prices, the one in the biggest letters comes first. Tap another price to pick it instead.
+4. **Which currency.** Some signs are shared: `$`, `¥`, `kr`, `Rs`. For these, and for tags with no sign at all, the app uses the **tag currency** you set. On *Automatic*, it follows the last tag that named its currency outright. If you see `€` once, unmarked prices after that are read as euros. The result always tells you when a currency was assumed.
+5. **Exchange rates** (`src/rates.js`). Rates come from [ExchangeRate-API's open endpoint](https://www.exchangerate-api.com/docs/free), which covers about 160 currencies and updates daily. If that fails, they come from [Frankfurter](https://frankfurter.dev), which has the ECB reference rates. Neither source needs a key. Rates are fetched again once they're more than an hour old, and the last set is kept on the phone for offline use. Every result shows the rate it used and when that rate was published.
+
+These are mid-market reference rates. What your card or a cash exchange actually charges will differ by its fee.
+
+## Files
+
+| File | What it does |
+|---|---|
+| `index.html` | The page: camera view, result panel, settings and "type a price" sheets |
+| `src/app.js` | Camera, scanning, live mode, photos, labels on the picture, settings |
+| `src/ocr.js` | Loads Tesseract, prepares the picture (crops, enlarges, evens out contrast, flips light-on-dark text) and reads lines |
+| `src/prices.js` | Finds prices in the text (no page needed, so it's tested on its own) |
+| `src/rates.js` | Fetches, caches and applies exchange rates |
+| `sw.js` | Offline copy of the app and the text reader |
+| `test/` | `prices.test.mjs`: unit tests for the price reading. `e2e.mjs`: a real browser fed price-tag pictures, both as a photo and as a fake camera |
+
+## Run it
+
+The camera only works from a secure address: `https://`, or `http://localhost` on a computer.
+
+```
+cd price-lens
+npx http-server -c-1 .        # then open http://localhost:8080
+```
+
+To use it on a phone, put the folder on any https host. Every path inside is relative, so a sub-folder works. Options include GitHub Pages, Netlify, Cloudflare Pages, or copying it under `docs/` in this repository, which would serve it at `https://jorycook.github.io/Yaoki/price-lens/`. Then, on the phone:
+
+- **iPhone:** open the address in Safari, tap Share, then Add to Home Screen.
+- **Android:** open it in Chrome, open the menu, then tap Install app.
+
+When you change a file, bump `VERSION` in `sw.js` so installed copies pick up the change.
+
+## Tests
+
+```
+npm test            # price reading: separators, signs, shared signs, things that aren't prices
+npm run e2e         # needs Playwright + Chromium and a connection
+```
+
+## Limits
+
+- The reader uses an English (Latin-script) model, so it reads Latin letters, digits and common signs (€ £ $ ¥). Prices written only in Japanese, Chinese, Korean, Thai or Arabic script (for example 千円) aren't read. Digits next to those scripts usually are, and the tag-currency setting fills in the currency.
+- Small, curved, glossy or blurry tags read poorly. Move closer so the price fills the box, and avoid glare.
+- Cents printed small and raised (4⁹⁹) may come out as 499. Check against the original amount, which is always shown under the converted price.
