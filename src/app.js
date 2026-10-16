@@ -377,6 +377,8 @@ function render() {
   renderRates();
 }
 
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
 function drawLabels(prices) {
   el.labels.replaceChildren();
   const f = fitOf();
@@ -398,14 +400,21 @@ function drawLabels(prices) {
     tag.type = 'button';
     tag.className = 'tag' + (main ? '' : ' minor');
     tag.textContent = money(out, settings.to);
-    /* the main price gets a label above it; the others are covered by theirs, so no label hides a neighbour */
-    const x = Math.min(Math.max(left + width / 2, 60), s.width - 60);
-    let y = main ? Math.max(top - 8, 70) : top + height / 2;
-    while (placed.some((q) => Math.abs(q.x - x) < 110 && Math.abs(q.y - y) < 34)) y += 36;
-    placed.push({ x, y });
-    Object.assign(tag.style, { left: x + 'px', top: y + 'px' });
-    tag.addEventListener('click', () => choose(p));
+    /* big enough to read at arm's length: about as tall as the price on screen, within limits */
+    tag.style.fontSize = Math.round(main ? clamp(height * 0.75, 34, 52) : clamp(height * 0.55, 22, 32)) + 'px';
+    tag.style.visibility = 'hidden';
     el.labels.appendChild(tag);
+    const w = tag.offsetWidth, h = tag.offsetHeight;
+    /* the main price gets a label above it; the others are covered by theirs, so no label hides a neighbour.
+       Labels stay on screen, clear of the top bar, and are nudged down until they do not overlap. */
+    const x = clamp(left + width / 2, w / 2 + 8, s.width - w / 2 - 8);
+    let y = main ? Math.max(top - 10, 72 + h) : Math.max(top + height / 2, 72 + h / 2);
+    const box0 = () => (main ? { t: y - h, b: y } : { t: y - h / 2, b: y + h / 2 });
+    const hits = () => placed.some((q) => Math.abs(q.x - x) < (q.w + w) / 2 + 6 && box0().t < q.b + 6 && box0().b > q.t - 6);
+    while (hits()) y += h / 2;
+    placed.push({ x, w, ...box0() });
+    Object.assign(tag.style, { left: x + 'px', top: y + 'px', visibility: '' });
+    tag.addEventListener('click', () => choose(p));
   });
 }
 

@@ -64,18 +64,18 @@ button { cursor: pointer; }
   position: absolute;
   transform: translate(-50%, -100%);
   pointer-events: auto;
-  border: 0; border-radius: 10px;
-  padding: 4px 10px;
+  border: 0; border-radius: 0.36em;
+  padding: 0.14em 0.42em;
   background: var(--accent); color: var(--accent-ink);
-  font-weight: 700; font-size: 17px; white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  font-weight: 800; font-size: 34px; line-height: 1.15; letter-spacing: -0.01em; white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
   animation: pop 0.18s ease-out;
 }
 .tag::after {
-  content: ""; position: absolute; left: 50%; bottom: -6px; margin-left: -6px;
-  border: 6px solid transparent; border-bottom: 0; border-top-color: var(--accent);
+  content: ""; position: absolute; left: 50%; bottom: -9px; margin-left: -9px;
+  border: 9px solid transparent; border-bottom: 0; border-top-color: var(--accent);
 }
-.tag.minor { transform: translate(-50%, -50%); background: rgba(255, 255, 255, 0.94); color: #111; font-size: 14px; font-weight: 600; animation-name: pop-minor; }
+.tag.minor { transform: translate(-50%, -50%); background: rgba(255, 255, 255, 0.95); color: #111; font-size: 22px; font-weight: 700; animation-name: pop-minor; }
 .tag.minor::after { display: none; }
 @keyframes pop-minor { from { transform: translate(-50%, -50%) scale(0.8); opacity: 0; } }
 .box { position: absolute; border: 2px solid var(--accent); border-radius: 6px; }
