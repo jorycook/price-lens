@@ -24,6 +24,13 @@
   <div id="reticle" class="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
   <div id="labels" class="labels"></div>
   <p id="hint" class="hint" role="status" aria-live="polite"></p>
+  <div class="cam-tools">
+    <button id="torch-btn" class="cam-btn" type="button" aria-pressed="false" aria-label="Flashlight" hidden>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M7 2h10l-1 5H8L7 2Zm1 6h8l-2 4v9a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1v-9L8 8Zm4 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg>
+    </button>
+    <button id="zoom-btn" class="cam-btn" type="button" aria-label="Zoom" hidden>2×</button>
+  </div>
+  <div id="focus-ring" class="focus-ring" hidden></div>
 </main>
 
 <header class="top">

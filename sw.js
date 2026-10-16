@@ -2,10 +2,10 @@
  * (fetched from a CDN the first time it is used) is stored as it arrives. Exchange rates are not
  * handled here: the page keeps the last ones itself and says how old they are.
  * Change VERSION whenever a file of the page changes, so phones pick up the new copy. */
-const VERSION = 'price-lens-2';
+const VERSION = 'price-lens-3';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
-  './src/app.js', './src/prices.js', './src/rates.js', './src/ocr.js', './src/location.js', './src/zones.js', './src/styles.css',
+  './src/app.js', './src/prices.js', './src/rates.js', './src/ocr.js', './src/location.js', './src/camera.js', './src/zones.js', './src/styles.css',
   './icons/icon.svg', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
 ];
 const CDN = 'https://cdn.jsdelivr.net/';

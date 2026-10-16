@@ -4,6 +4,7 @@ import { findPrices, currencyForLanguage, priceKey } from './prices.js';
 import { COUNTRY_CURRENCY, countryName, countryFromTimeZone, countryFromGps, gpsAllowed } from './location.js';
 import { getRates, storedRates, convert, rateOf } from './rates.js';
 import { getReader, readLines } from './ocr.js';
+import { openBackCamera, tuneTrack, setZoom, zoomRange, currentZoom, hasTorch, setTorch, focusAt, captureSharpest, frameGate, attachPinch } from './camera.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -12,6 +13,7 @@ const el = {
   resultEmpty: $('result-empty'), resultMain: $('result-main'), converted: $('converted'), original: $('original'),
   assumed: $('assumed'), others: $('others'), ratesLine: $('rates-line'),
   shutter: $('shutter'), shutterLabel: $('shutter-label'), liveBtn: $('live-btn'),
+  zoomBtn: $('zoom-btn'), torchBtn: $('torch-btn'), focusRing: $('focus-ring'),
   intro: $('intro'), introError: $('intro-error'),
   settings: $('settings'), toSelect: $('to-select'), fromSelect: $('from-select'), ratesDetail: $('rates-detail'),
   typer: $('typer'), typerInput: $('typer-input'), typerOut: $('typer-out'),
@@ -39,6 +41,11 @@ const tagCurrency = () => (settings.from === 'auto' ? place.currency || guess : 
 const state = {
   table: storedRates(),
   stream: null,
+  track: null,        // the camera's video track (zoom, torch, focus)
+  torch: false,
+  shooting: false,    // waiting for the sharpest frame of a burst
+  gate: null,         // live mode: picks the frames worth reading
+  liveRun: 0,
   wantCamera: false,
   live: false,
   frozen: false,      // a still is on screen (a captured frame or a chosen photo)
@@ -85,16 +92,25 @@ function sourceSize() {
   const s = source();
   return s === el.video ? [s.videoWidth, s.videoHeight] : [s.width, s.height];
 }
+/* a picture sw × sh shown filling the screen (camera) or whole on it (photo) */
+function fitFor(sw, sh, whole) {
+  const W = el.stage.clientWidth, H = el.stage.clientHeight;
+  const scale = (whole ? Math.min : Math.max)(W / sw, H / sh);
+  return { scale, ox: (W - sw * scale) / 2, oy: (H - sh * scale) / 2, sw, sh };
+}
 function fitOf() {
   const [sw, sh] = sourceSize();
-  const W = el.stage.clientWidth, H = el.stage.clientHeight;
-  const scale = (state.photo ? Math.min : Math.max)(W / sw, H / sh);
-  return { scale, ox: (W - sw * scale) / 2, oy: (H - sh * scale) / 2, sw, sh };
+  return fitFor(sw, sh, state.photo);
 }
 /* the part of the source inside the aiming box (or the whole photo) */
 function scanRegion() {
   const f = fitOf();
   if (state.photo) return { x: 0, y: 0, w: f.sw, h: f.sh };
+  return boxIn(f.sw, f.sh);
+}
+/* the aiming box in the pixels of a camera frame sw × sh */
+function boxIn(sw, sh) {
+  const f = fitFor(sw, sh, false);
   const r = el.reticle.getBoundingClientRect(), s = el.stage.getBoundingClientRect();
   const x = Math.max(0, (r.left - s.left - f.ox) / f.scale);
   const y = Math.max(0, (r.top - s.top - f.oy) / f.scale);
@@ -102,6 +118,7 @@ function scanRegion() {
   const h = Math.min(f.sh - y, r.height / f.scale);
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
 }
+const videoBox = () => boxIn(el.video.videoWidth, el.video.videoHeight);
 
 /* ---------- camera ---------- */
 
@@ -114,19 +131,19 @@ async function startCamera() {
       : 'The camera needs a secure (https) address. Open Price Lens from its https link, or use a photo instead.');
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    });
+    const stream = await openBackCamera();
     state.stream = stream;
+    state.track = stream.getVideoTracks()[0];
     el.video.srcObject = stream;
     await el.video.play().catch(() => {});
-    const [track] = stream.getVideoTracks();
-    track.applyConstraints?.({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
     el.intro.hidden = true;
     unfreeze();
-    setHint('Aim the box at a price, then tap Scan');
+    setHint(AIM_HINT);
     warmUp();
+    /* zoom in (2× unless the person chose otherwise), so the tag is read from beyond the lens's
+       closest focus; constraints go on once the video is playing */
+    await tuneTrack(state.track, { zoom: settings.zoom ?? 2 });
+    updateCameraButtons();
   } catch (err) {
     console.warn(err);
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
@@ -146,6 +163,22 @@ function cameraFailed(message) {
 function stopCamera() {
   state.stream?.getTracks().forEach((t) => t.stop());
   state.stream = null;
+  state.track = null;
+  state.torch = false;
+  updateCameraButtons();
+}
+
+const AIM_HINT = 'Aim the box at a price, about 25 cm away, then tap Scan';
+const zoomText = (z) => `${Math.round(z * 10) / 10}×`;
+
+/* the zoom and flashlight buttons, shown only when this camera has them */
+function updateCameraButtons() {
+  const t = state.track;
+  const range = t && zoomRange(t);
+  el.zoomBtn.hidden = !range;
+  if (range) el.zoomBtn.textContent = zoomText(currentZoom(t) || 1);
+  el.torchBtn.hidden = !(t && hasTorch(t));
+  el.torchBtn.setAttribute('aria-pressed', String(state.torch));
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -162,7 +195,7 @@ function warmUp() {
   getReader((p, status) => {
     if (!state.busy && p < 1) setHint(`Getting the text reader ready… ${Math.round(p * 100)}%`);
   }).then(() => {
-    if (!state.busy && !state.prices.length) setHint(state.photo ? '' : 'Aim the box at a price, then tap Scan');
+    if (!state.busy && !state.prices.length) setHint(state.photo ? '' : AIM_HINT);
   }).catch((err) => setHint(err.message));
 }
 
@@ -170,12 +203,12 @@ function warmUp() {
 
 function setHint(text) { el.hint.textContent = text; }
 
-function freezeFrame() {
-  const v = el.video;
-  if (!v.videoWidth) return false;
-  el.still.width = v.videoWidth;
-  el.still.height = v.videoHeight;
-  el.still.getContext('2d').drawImage(v, 0, 0);
+/* shows a camera frame (the sharpest of the burst) as a still, to read and label */
+function freezeFrame(frame) {
+  if (!frame.width) return false;
+  el.still.width = frame.width;
+  el.still.height = frame.height;
+  el.still.getContext('2d').drawImage(frame, 0, 0);
   state.frozen = true;
   state.photo = false;
   el.still.hidden = false;
@@ -197,18 +230,19 @@ function readPrices(lines, region) {
   return findPrices(lines, { local: tagCurrency(), codes: knownCodes(), center });
 }
 
-async function scan({ quiet = false } = {}) {
+/* Reads the aiming box of the picture on screen, or of a camera frame handed over by live mode. */
+async function scan({ quiet = false, from = null } = {}) {
   if (state.busy) return null;
-  const [sw] = sourceSize();
+  const [sw] = from ? [from.width] : sourceSize();
   if (!sw) return null;
   state.busy = true;
   el.reticle.classList.add('busy');
   el.shutter.disabled = !state.live;
   if (!quiet) setHint('Reading…');
   try {
-    const region = scanRegion();
+    const region = from ? boxIn(from.width, from.height) : scanRegion();
     if (region.w < 20 || region.h < 20) return null;
-    const lines = await readLines(source(), region);
+    const lines = await readLines(from || source(), region);
     state.lines = lines;
     state.region = region;
     let prices = readPrices(lines, region);
@@ -282,15 +316,50 @@ function rereadLast() {
   drawLabels(state.prices);
 }
 
+/* The Scan button: let the shake of the tap settle, keep the sharpest frame of a short burst,
+   show it as a still and read it. */
+async function shoot() {
+  if (state.busy || state.shooting || !el.video.videoWidth) return;
+  state.shooting = true;
+  el.shutter.disabled = true;
+  el.reticle.classList.add('busy');
+  setHint('Hold still…');
+  try {
+    const shot = await captureSharpest(el.video, videoBox);
+    if (!state.stream || state.live) return;
+    freezeFrame(shot.canvas);
+    updateShutter();
+    await scan();
+  } finally {
+    state.shooting = false;
+    el.shutter.disabled = false;
+  }
+}
+
 /* ---------- live mode: keep reading the moving picture ---------- */
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Reads frame after frame, but only frames worth reading: the frame gate keeps the sharpest steady
+   frame since the last read, and the reticle turns green while the phone is held steady. */
 async function liveLoop() {
+  const run = ++state.liveRun;
   let misses = 0;
-  while (state.live && state.stream && !document.hidden) {
-    const found = await scan({ quiet: true });
-    if (found && found.length) misses = 0;
-    else if (++misses >= FRAMES) { el.labels.replaceChildren(); state.pickKey = null; state.locked = false; }
-    await new Promise((r) => setTimeout(r, 250));
+  state.gate?.stop();
+  const gate = (state.gate = frameGate(el.video, videoBox, (steady) => el.reticle.classList.toggle('steady', steady)));
+  try {
+    while (state.live && state.stream && !document.hidden && run === state.liveRun) {
+      const frame = gate.take();
+      if (!frame) { await sleep(80); continue; }
+      const found = await scan({ quiet: true, from: frame.canvas });
+      if (found && found.length) misses = 0;
+      else if (++misses >= FRAMES) { el.labels.replaceChildren(); state.pickKey = null; state.locked = false; }
+      await sleep(120);
+    }
+  } finally {
+    gate.stop();
+    if (state.gate === gate) state.gate = null;
+    el.reticle.classList.remove('steady');
   }
 }
 
@@ -552,12 +621,12 @@ $('start-btn').addEventListener('click', startCamera);
 el.shutter.addEventListener('click', () => {
   if (state.live) return setLive(false);
   if (state.frozen) {
-    if (state.stream) { unfreeze(); setHint('Aim the box at a price, then tap Scan'); }
+    if (state.stream) { unfreeze(); setHint(AIM_HINT); }
     else $('photo-input').click();
     return;
   }
   if (!state.stream) return $('photo-input').click();
-  if (freezeFrame()) { updateShutter(); scan(); }
+  shoot();
 });
 el.liveBtn.addEventListener('click', () => {
   if (!state.stream) return startCamera().then(() => state.stream && setLive(true));
@@ -586,6 +655,45 @@ for (const d of [el.settings, el.typer]) {
 }
 window.addEventListener('resize', () => state.prices.length && drawLabels(state.prices));
 window.addEventListener('online', () => refreshRates());
+
+/* zoom button: steps through 1×, 2×, 3× (as far as the camera goes); pinching works too */
+el.zoomBtn.addEventListener('click', async () => {
+  const t = state.track, range = t && zoomRange(t);
+  if (!range) return;
+  const now = currentZoom(t) || 1;
+  const steps = [1, 2, 3].filter((z) => z >= Math.max(1, range.min) && z <= range.max);
+  const next = steps.find((z) => z > now + 0.05) ?? steps[0];
+  const z = await setZoom(t, next);
+  if (z != null) { settings.zoom = z; saveSettings(); }
+  updateCameraButtons();
+});
+attachPinch(el.stage, () => state.track, (z) => {
+  settings.zoom = z;
+  saveSettings();
+  el.zoomBtn.textContent = zoomText(z);
+});
+el.torchBtn.addEventListener('click', async () => {
+  if (!state.track) return;
+  const on = !state.torch;
+  if (await setTorch(state.track, on)) state.torch = on;
+  updateCameraButtons();
+});
+/* tap on the picture to focus there, where the browser allows it (Chrome on Android) */
+el.stage.addEventListener('click', async (e) => {
+  if (!state.track || state.frozen || e.target.closest('button')) return;
+  const f = fitFor(el.video.videoWidth, el.video.videoHeight, false);
+  const s = el.stage.getBoundingClientRect();
+  const x = (e.clientX - s.left - f.ox) / f.scale / f.sw, y = (e.clientY - s.top - f.oy) / f.scale / f.sh;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;
+  if (await focusAt(state.track, x, y)) {
+    Object.assign(el.focusRing.style, { left: e.clientX - s.left + 'px', top: e.clientY - s.top + 'px' });
+    el.focusRing.hidden = false;
+    el.focusRing.style.animation = 'none';
+    void el.focusRing.offsetWidth; // restart the animation
+    el.focusRing.style.animation = '';
+  }
+});
+el.video.addEventListener('resize', () => { if (!state.frozen && state.prices.length) drawLabels(state.prices); });
 
 /* ---------- start ---------- */
 

@@ -167,6 +167,24 @@ const maker = await chromium.launch({ args: proxyArgs });
   check(!r.prices.some(([a]) => [12, 4471, 30].includes(a)), 'camera: aisle, item and "save 30" numbers are not prices');
   await page.screenshot({ path: join(OUT, 'camera.png') });
 
+  /* the burst keeps the sharpest frame: the score must rank a sharp picture above a blurred one */
+  const ranks = await page.evaluate(async () => {
+    const { frameScore } = await import('./src/camera.js');
+    const draw = (blur) => {
+      const c = document.createElement('canvas');
+      c.width = 600; c.height = 300;
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, 600, 300);
+      x.filter = blur ? `blur(${blur}px)` : 'none';
+      x.fillStyle = '#000'; x.font = 'bold 120px sans-serif'; x.fillText('£3.49', 120, 200);
+      return c;
+    };
+    const box = { x: 0, y: 0, w: 600, h: 300 };
+    return [0, 1.5, 4].map((b) => frameScore(draw(b), box).sharpness);
+  });
+  console.log('   sharpness (sharp, slightly blurred, blurred):', ranks.map(Math.round).join(', '));
+  check(ranks[0] > ranks[1] && ranks[1] > ranks[2], 'camera: the sharpness score ranks sharp > slightly blurred > blurred');
+
   /* live mode keeps reading */
   await page.click('#shutter'); // back to the moving picture
   await page.click('#live-btn');
@@ -184,7 +202,50 @@ const maker = await chromium.launch({ args: proxyArgs });
   await browser.close();
 }
 
-/* ---------- 3. GPS beats the time zone: phone still on London time, but in Tokyo ---------- */
+/* ---------- 3. zoom and flashlight, on a camera that has them ---------- */
+{
+  const video = join(OUT, 'tag-gbp.y4m');
+  const browser = await chromium.launch({
+    args: [...proxyArgs, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`],
+  });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-GB', timezoneId: 'Europe/London', permissions: ['camera'] });
+  /* the test camera has neither, so pretend it does and record what the app asks of it */
+  await ctx.addInitScript(() => {
+    const P = MediaStreamTrack.prototype;
+    const caps = P.getCapabilities, settings = P.getSettings;
+    window.applied = [];
+    let zoom = 1, torch = false;
+    P.getCapabilities = function () { return { ...caps.call(this), zoom: { min: 1, max: 5, step: 0.1 }, torch: true }; };
+    P.getSettings = function () { return { ...settings.call(this), zoom, torch }; };
+    P.applyConstraints = async function (c) {
+      const a = (c.advanced || [])[0] || {};
+      window.applied.push(a);
+      if ('zoom' in a) zoom = a.zoom;
+      if ('torch' in a) torch = a.torch;
+    };
+  });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.goto(base);
+  await page.waitForSelector('#intro', { state: 'hidden', timeout: 10000 }).catch(() => page.click('#start-btn'));
+  await page.waitForFunction(() => !document.getElementById('zoom-btn').hidden, null, { timeout: 15000 }).catch(() => {});
+  const z0 = await page.textContent('#zoom-btn');
+  check(z0 === '2×', `zoom: starts at 2× (shows ${z0})`);
+  await page.click('#zoom-btn');
+  const z1 = await page.textContent('#zoom-btn');
+  await page.click('#zoom-btn');
+  const z2 = await page.textContent('#zoom-btn');
+  check(z1 === '3×' && z2 === '1×', `zoom: the button steps 2× → 3× → 1× (got ${z1}, ${z2})`);
+  check(await page.isVisible('#torch-btn'), 'torch: the flashlight button shows when the camera has one');
+  await page.click('#torch-btn');
+  const torch = await page.evaluate(() => ({ pressed: document.getElementById('torch-btn').getAttribute('aria-pressed'), asked: window.applied.some((a) => a.torch === true) }));
+  check(torch.pressed === 'true' && torch.asked, 'torch: tapping it turns the flashlight on');
+  const remembered = await page.evaluate(() => JSON.parse(localStorage.getItem('price-lens:settings')).zoom);
+  check(remembered === 1, 'zoom: the chosen zoom is remembered');
+  await browser.close();
+}
+
+/* ---------- 4. GPS beats the time zone: phone still on London time, but in Tokyo ---------- */
 {
   const { png } = await drawTag(maker, tagHtml(`
     <div style="font-size:30px">Matcha Kit Kat</div>
