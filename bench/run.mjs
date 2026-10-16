@@ -53,7 +53,7 @@ await benchPage.evaluate(() => window.bench.ready);
 const drawPage = await ctx.newPage();
 if (IMAGES) await mkdir(IMAGES, { recursive: true });
 
-const same = (a, b) => a && b && Math.abs(a.amount - b.amount) < 0.005 && a.currency === b.currency;
+const same = (a, b) => !!a && !!b && Math.abs(a.amount - b.amount) < 0.005 && a.currency === b.currency;
 
 function score(truth, prices) {
   const top = prices[0] || null;
