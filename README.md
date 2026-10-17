@@ -34,6 +34,7 @@ These are mid-market reference rates. What your card or a cash exchange actually
 | `index.html` | The page: camera view, result panel, settings and "type a price" sheets |
 | `src/app.js` | Camera, scanning, live mode, photos, labels on the picture, settings |
 | `src/ocr.js` | Loads Tesseract, prepares the picture (crops, enlarges, evens out contrast, flips light-on-dark text) and reads lines |
+| `src/ocr-paddle.js` | A second reader with the same `readLines`: PaddleOCR's PP-OCRv6 tiny models (finds the lines of text, then reads each) on ONNX Runtime Web. Not used by the app yet; `node bench/run.mjs --engine paddle` measures it |
 | `src/prices.js` | Finds prices in the text (no page needed, so it's tested on its own) |
 | `src/rates.js` | Fetches, caches and applies exchange rates |
 | `src/location.js` | Which country the phone is in (time zone, or GPS) and its currency |

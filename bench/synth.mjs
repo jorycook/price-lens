@@ -74,7 +74,8 @@ function amountFor(r, loc) {
     return n;
   }
   const endings = [0.99, 0.49, 0.95, 0.89, 0.29, 0.00, 0.50, 0.79, 0.19, 0.59];
-  return Math.floor(n) + r.pick(endings);
+  const price = Math.floor(n) + r.pick(endings);
+  return price > 0 ? price : 0.99; // never a price of nothing
 }
 
 /* The design of one tag. style picks the layout; the rest is drawn from the random generator. */

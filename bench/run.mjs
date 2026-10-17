@@ -3,6 +3,8 @@
  *   node bench/run.mjs                       made-up tags (120, seed 1)
  *   node bench/run.mjs --synth 40 --seed 7   fewer, different ones
  *   node bench/run.mjs --real path/to/labels.json --synth 0
+ *   node bench/run.mjs --engine paddle       read with PaddleOCR (src/ocr-paddle.js) instead of Tesseract
+ *   node bench/run.mjs --engine paddle --settings '{"detSide":480}'   with other reader settings
  *   options: --only <regex on case id>  --out results.json  --images <folder to keep the pictures in>
  *
  * Each picture goes through the app's own reading code (src/ocr.js and src/prices.js) in headless
@@ -25,6 +27,8 @@ const REAL = opt('real', null);
 const ONLY = opt('only', null) ? new RegExp(opt('only')) : null;
 const OUT = opt('out', null);
 const IMAGES = opt('images', null);
+const ENGINE = opt('engine', 'tesseract');
+const SETTINGS = opt('settings', null);
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const REAL_DIR = REAL ? dirname(resolve(REAL)) : null;
 
@@ -47,7 +51,8 @@ const browser = await chromium.launch({ args: proxyArgs });
 const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
 const benchPage = await ctx.newPage();
 benchPage.on('pageerror', (e) => console.error('bench page error:', e.message));
-await benchPage.goto(`${origin}/bench/bench.html`);
+const query = new URLSearchParams({ ...(ENGINE !== 'tesseract' && { engine: ENGINE }), ...(SETTINGS && { settings: SETTINGS }) });
+await benchPage.goto(`${origin}/bench/bench.html${query.size ? '?' + query : ''}`);
 await benchPage.waitForFunction(() => window.bench, null, { timeout: 20000 });
 await benchPage.evaluate(() => window.bench.ready);
 const drawPage = await ctx.newPage();
@@ -120,6 +125,6 @@ summary('synth easy', results.filter((r) => r.set === 'synth' && !r.hard));
 summary('synth hard', results.filter((r) => r.set === 'synth' && r.hard));
 for (const style of [...new Set(results.map((r) => r.style))].sort()) summary('  ' + style, results.filter((r) => r.style === style));
 if (OUT) {
-  await writeFile(OUT, JSON.stringify({ seed: SEED, synth: SYNTH, real: REAL, results }, null, 1));
+  await writeFile(OUT, JSON.stringify({ engine: ENGINE, settings: SETTINGS && JSON.parse(SETTINGS), seed: SEED, synth: SYNTH, real: REAL, results }, null, 1));
   console.log(`\ndetails in ${OUT}`);
 }
