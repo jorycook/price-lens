@@ -9,7 +9,7 @@ It's a web app with no build step. Open it in Safari or Chrome on a phone and ad
 1. **Camera.** The back camera fills the screen and you aim the box at a price. **Scan** freezes the frame and reads it. **Live** keeps reading while you move the phone, and labels each price in place. **Photo** reads a picture you already have. **Type** converts a price you type in.
 2. **Reading the text** (`src/reader.js`). [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s PP-OCRv6 tiny models run on the phone, in [ONNX Runtime Web](https://onnxruntime.ai) compiled to WebAssembly, so pictures never leave the device. One small neural network finds the lines of text in the picture; a second reads each line. They were trained on photos of signs, shelves and packaging, so they read price tags at an angle, in odd light or on coloured card far better than a reader made for scanned pages (see [Measuring](#measuring)).
    - The first scan downloads the reader: about 8.4 MB (19 MB once unpacked), with a progress figure on screen. After that it's stored on the phone, and works offline.
-   - It reads in a background worker, so the screen keeps responding. A picture takes about half a second on a laptop; phones are slower.
+   - It reads in a background worker, so the screen keeps responding. A picture takes about half a second on a computer; phones are slower.
    - It needs a recent browser: Safari 16.4 or later on an iPhone, a recent Chrome on Android. When it starts, it first reads a small picture of a known price, because some phones get the sums wrong (iOS 16.4 to 16.5.0 read garbage).
    - Where it can't start, can't be downloaded, fails that test or stops responding, [Tesseract](https://github.com/naptha/tesseract.js) reads instead, for the rest of the visit (about 4.4 MB, also stored on the phone). Settings then shows *Text reader: standard*, and why.
 3. **Finding the price** (`src/prices.js`). This step handles:
@@ -89,6 +89,17 @@ node bench/run.mjs --engine paddle --settings '{"boxThresh":0.4}'   # try other 
 ```
 
 `labels.json` lists your photos: `[{ "id", "file", "aim": [x0, y0, x1, y1], "main": { "amount", "currency" }, "others": [...] }]`, with `aim` the part of the photo inside the aiming box.
+
+The numbers so far, in headless Chromium on a 4-core computer. *Right*: the first price offered is the tag's price; *wrong*: prices offered that are not on the tag as prices, per tag. The real photos are 66 freely licensed photos of price tags from Wikimedia Commons, kept outside the repository and split in two halves: one to make decisions on, one held back to check them.
+
+| | PaddleOCR (default) | Tesseract (fallback) |
+|---|---|---|
+| 120 made-up tags, seed 1 | 98% right, 0.05 wrong | 54% right, 0.17 wrong |
+| 120 made-up tags, seed 2 | 98% right, 0.07 wrong | 53% right, 0.26 wrong |
+| 33 real photos (decision half) | 20 right, 0.48 wrong | 4 right, 0.24 wrong |
+| 33 real photos (held-back half) | 16 right, 0.48 wrong | 6 right, 0.27 wrong |
+
+A read took 0.4 to 0.7 s with either reader. In WebKit (Safari's engine), PaddleOCR got 15 of the held-back half right. The detector's box threshold is PP-OCRv6's own 0.4: 0.3, 0.4 and 0.45 read the decision sets the same, and 0.5 lost a tag in each.
 
 ## Limits
 

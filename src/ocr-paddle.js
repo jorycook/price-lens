@@ -24,14 +24,20 @@ class ReaderError extends Error {
   }
 }
 
-/* Whether this browser can start module workers (a worker that can `import`). Browsers that know
-   the option read `type` from it; older ones never look. */
+/* (func (result v128) i32.const 0 i8x16.splat i8x16.popcnt): valid only where WebAssembly has SIMD */
+const SIMD_TEST = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+
+/* Whether this browser could run the reader, as far as the page can tell: module workers (a
+   worker that can `import`; browsers that know the option read `type` from it, older ones never
+   look), OffscreenCanvas, and WebAssembly with SIMD. The worker checks the rest itself. */
 export function canStart() {
-  let known = false;
+  let modules = false;
   try {
-    new Worker('blob://', { get type() { known = true; return 'module'; } }).terminate();
+    new Worker('blob://', { get type() { modules = true; return 'module'; } }).terminate();
   } catch {}
-  return known && typeof OffscreenCanvas === 'function' && typeof WebAssembly === 'object';
+  let simd = false;
+  try { simd = WebAssembly.validate(SIMD_TEST); } catch {}
+  return modules && simd && typeof OffscreenCanvas === 'function';
 }
 
 /* Changes the worker's settings (bench experiments); takes effect on the next read. */

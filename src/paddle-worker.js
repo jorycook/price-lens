@@ -11,7 +11,7 @@
  *      line of characters.
  *
  * All of it runs here, off the page's thread, so the page stays smooth while a picture is read
- * (a read takes a second or more on a phone). The page sends a snapshot of the part to read
+ * (about half a second on a computer, longer on a phone). The page sends a snapshot of the part to read
  * (src/ocr-paddle.js); detection and every crop use those same pixels.
  *
  * Messages in:  { type: 'start', settings }, { type: 'read', id, image }, { type: 'configure', settings }
@@ -51,14 +51,20 @@ const MODEL_SETS = {
     rec: file('@arcships/light-ocr-model-ppocrv6-small@0.3.4/bundle/rec/inference.onnx', 21159378),
     dict: file('@arcships/light-ocr-model-ppocrv6-small@0.3.4/bundle/rec/dictionary.json', 112408),
   },
+  /* PP-OCRv4 mobile, Chinese and English (2023): 16 MB. Its dictionary has no € or £. */
+  'v4': {
+    det: file('@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_det_infer.onnx', 4745517), // MIT package, Apache-2.0 weights
+    rec: file('@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx', 10822323),
+    dict: file('@gutenye/ocr-models@1.4.2/assets/ppocr_keys_v1.txt', 26249),
+  },
 };
-/* PaddleOCR's text direction classifier (upright or turned 180°), 0.6 MB; works with either set */
+/* PaddleOCR's text direction classifier (upright or turned 180°), 0.6 MB; works with any set */
 const CLS = file('@gutenye/ocr-models@1.4.2/assets/ch_ppocr_mobile_v2.0_cls_infer.onnx', 578966);
 
 /* What the reader does; bench/ experiments change these before the first read. */
 const settings = {
   models: 'v6-tiny',
-  det: null,        // a detection model from the other set (null: the set's own)
+  det: null,        // a detection model from another set, e.g. 'v4' (null: the set's own)
   detSide: 640,     // the long side of the picture the detector sees, in pixels
   detSide2: 0,      // and of a second, smaller look for big letters (0: none)
   upscale: true,    // enlarge small pictures to detSide too (small text is found more often)

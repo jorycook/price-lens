@@ -12,9 +12,9 @@
 import * as paddle from './ocr-paddle.js';
 import * as tesseract from './ocr.js';
 
-/* what Settings shows: { engine: 'paddle' | 'tesseract' | null, why } */
+/* what Settings shows: { engine: 'paddle' | 'tesseract' | null (not started yet), why } */
 const status = { engine: null, why: null };
-let listeners = [];
+const listeners = [];
 let choice = null;          // promise of the reader module in use
 let paddleFailed = false;   // once PaddleOCR fails, it is not tried again during this visit
 let progress = () => {};
@@ -32,7 +32,7 @@ export function onReaderChange(fn) { listeners.push(fn); }
 /* One plain sentence for Settings. */
 export function readerNote() {
   if (status.engine === 'paddle') return 'Text reader: PaddleOCR, running on this phone.';
-  if (status.engine !== 'tesseract') return 'Text reader: starts with the first scan.';
+  if (status.engine !== 'tesseract') return status.why === 'starting' ? 'Text reader: getting ready…' : 'Text reader: starts with the first scan.';
   const why = {
     download: 'the better reader could not be downloaded; it will try again next time you open Price Lens',
     stopped: 'the better reader stopped working; it will try again next time you open Price Lens',
@@ -72,9 +72,6 @@ async function selfTest() {
 const failedTestHere = () => { try { return localStorage.getItem(SELF_TEST_KEY) === navigator.userAgent; } catch { return false; } };
 const rememberFailedTest = () => { try { localStorage.setItem(SELF_TEST_KEY, navigator.userAgent); } catch {} };
 
-const SIMD_TEST = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
-const hasSimd = () => { try { return WebAssembly.validate(SIMD_TEST); } catch { return false; } };
-
 async function useTesseract(why) {
   paddleFailed = true;
   setStatus('tesseract', why);
@@ -90,7 +87,8 @@ async function useTesseract(why) {
 
 async function choose() {
   if (paddleFailed) return useTesseract(status.why);
-  if (!paddle.canStart() || !hasSimd() || failedTestHere()) return useTesseract('unsupported');
+  if (!paddle.canStart() || failedTestHere()) return useTesseract('unsupported');
+  setStatus(null, 'starting');
   try {
     await paddle.getReader((p) => progress(p));
     await selfTest();
