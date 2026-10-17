@@ -3,7 +3,7 @@
 import { findPrices, currencyForLanguage, priceKey } from './prices.js';
 import { COUNTRY_CURRENCY, countryName, countryFromTimeZone, countryFromGps, gpsAllowed } from './location.js';
 import { getRates, storedRates, convert, rateOf } from './rates.js';
-import { getReader, readLines } from './ocr.js';
+import { getReader, readLines, readerNote, onReaderChange, readerInfo } from './reader.js';
 import { openBackCamera, tuneTrack, setZoom, zoomRange, currentZoom, hasTorch, setTorch, focusAt, captureSharpest, frameGate, attachPinch } from './camera.js';
 
 const $ = (id) => document.getElementById(id);
@@ -15,7 +15,7 @@ const el = {
   shutter: $('shutter'), shutterLabel: $('shutter-label'), liveBtn: $('live-btn'),
   zoomBtn: $('zoom-btn'), torchBtn: $('torch-btn'), focusRing: $('focus-ring'),
   intro: $('intro'), introError: $('intro-error'),
-  settings: $('settings'), toSelect: $('to-select'), fromSelect: $('from-select'), ratesDetail: $('rates-detail'),
+  settings: $('settings'), readerLine: $('reader-line'), toSelect: $('to-select'), fromSelect: $('from-select'), ratesDetail: $('rates-detail'),
   typer: $('typer'), typerInput: $('typer-input'), typerOut: $('typer-out'),
 };
 
@@ -149,7 +149,7 @@ async function startCamera() {
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     cameraFailed(denied
       ? 'Camera access was refused. Allow the camera for this site in your browser settings, or use a photo instead.'
-      : 'The camera could not start (' + (err?.message || err) + '). You can use a photo instead.');
+      : 'The camera could not start. Close other apps that may be using it, or use a photo instead.');
   }
 }
 
@@ -192,11 +192,17 @@ document.addEventListener('visibilitychange', () => {
 
 /* the reader takes a few seconds to load the first time; start it while the person aims */
 function warmUp() {
-  getReader((p, status) => {
+  getReader((p) => {
     if (!state.busy && p < 1) setHint(`Getting the text reader ready… ${Math.round(p * 100)}%`);
   }).then(() => {
     if (!state.busy && !state.prices.length) setHint(state.photo ? '' : AIM_HINT);
-  }).catch((err) => setHint(err.message));
+  }).catch((err) => setHint(plainError(err, 'The text reader could not start. Check the connection and try again.')));
+}
+
+/* What people see of an error: our own sentences, never the browser's technical wording */
+function plainError(err, fallback) {
+  console.error(err);
+  return err?.plain ? err.message : fallback;
 }
 
 /* ---------- scanning ---------- */
@@ -264,8 +270,7 @@ async function scan({ quiet = false, from = null } = {}) {
     }
     return prices;
   } catch (err) {
-    console.error(err);
-    setHint(err.message || 'Could not read the picture.');
+    setHint(plainError(err, 'Could not read the picture. Try again.'));
     return null;
   } finally {
     state.busy = false;
@@ -396,7 +401,7 @@ async function usePhoto(file) {
     bitmap = await new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('That file is not a picture this browser can open.'));
+      img.onerror = () => reject(Object.assign(new Error('That file is not a picture this browser can open.'), { plain: true }));
       img.src = URL.createObjectURL(file);
     });
   }
@@ -633,13 +638,14 @@ el.liveBtn.addEventListener('click', () => {
   setLive(!state.live);
 });
 for (const id of ['photo-input', 'photo-input-2']) {
-  $(id).addEventListener('change', (e) => { usePhoto(e.target.files[0]).catch((err) => setHint(err.message)); e.target.value = ''; });
+  $(id).addEventListener('change', (e) => { usePhoto(e.target.files[0]).catch((err) => setHint(plainError(err, 'That picture could not be opened.'))); e.target.value = ''; });
 }
 const openTyper = () => { el.typer.showModal(); el.typerInput.focus(); typed(); };
 $('type-btn').addEventListener('click', openTyper);
 $('type-btn-2').addEventListener('click', openTyper);
 el.typerInput.addEventListener('input', typed);
-const openSettings = () => { fillSelects(); renderRates(); el.settings.showModal(); };
+const openSettings = () => { fillSelects(); renderRates(); el.readerLine.textContent = readerNote(); el.settings.showModal(); };
+onReaderChange((note) => { el.readerLine.textContent = note; });
 $('settings-btn').addEventListener('click', openSettings);
 $('to-btn').addEventListener('click', () => { openSettings(); el.toSelect.focus(); });
 $('from-btn').addEventListener('click', () => { openSettings(); el.fromSelect.focus(); });
@@ -711,9 +717,10 @@ setInterval(() => { if (!document.hidden) refreshRates(); }, 15 * 60 * 1000);
 /* open straight onto the camera when it was allowed before */
 navigator.permissions?.query({ name: 'camera' }).then((p) => { if (p.state === 'granted') startCamera(); }).catch(() => {});
 
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
+/* any secure address (https, or http://localhost while testing) can have the offline copy */
+if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('sw.js').catch((err) => console.warn('offline copy:', err));
 }
 
 /* for the tests */
-window.priceLens = { state, settings, place, scan, usePhoto };
+window.priceLens = { state, settings, place, scan, usePhoto, reader: readerInfo };

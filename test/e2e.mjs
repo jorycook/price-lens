@@ -1,26 +1,33 @@
 /* Price Lens: end-to-end check in a real browser.
  *
  * Draws price tags, then (1) hands one to the page as a photo and (2) plays another to the page as
- * its camera, and checks the price is read and converted. Needs Playwright with Chromium, and a
- * connection (the text reader and the exchange rates come from the web).
+ * its camera, and checks the price is read and converted, with the default reader (PaddleOCR, in
+ * its worker) while the page keeps responding. Then (5) blocks that reader's downloads, to check
+ * the app falls back to Tesseract, and (6) cuts the network after one visit, to check it still
+ * reads offline. Needs Playwright with Chromium, and a connection (the text reader and the
+ * exchange rates come from the web).
  *
- *   node test/e2e.mjs            (from the price-lens folder) */
+ *   node test/e2e.mjs            (from the price-lens folder)
+ *   PL_ONLY=5,6 node test/e2e.mjs  only some of the parts below */
 
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
+import { connect } from 'node:net';
 
 const { chromium } = await import('playwright').catch(() => createRequire(import.meta.url)('playwright'));
 const ROOT = new URL('..', import.meta.url).pathname;
 const OUT = process.env.PL_OUT || join(tmpdir(), 'price-lens-e2e');
 await mkdir(OUT, { recursive: true });
 
-/* a tiny static server for the app */
+/* a tiny static server for the app; it can hold back the offline worker's script (see part 6) */
+let swHeld = null;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const server = createServer(async (req, res) => {
   const path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^(\.\.[/\\])+/, '');
+  if (path === '/sw.js' && swHeld) await swHeld;
   try {
     const file = join(ROOT, path.endsWith('/') ? path + 'index.html' : path);
     const body = await readFile(file);
@@ -35,6 +42,35 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 
 /* behind a proxy, pass it to Chromium directly: Playwright's own proxy option also sends the local server through it */
 const proxyArgs = process.env.HTTPS_PROXY ? [`--proxy-server=${process.env.HTTPS_PROXY}`, '--proxy-bypass-list=127.0.0.1;localhost'] : [];
+
+/* A switch for the network (part 6): a small proxy that passes the browser's https connections on
+   (to HTTPS_PROXY, if set) until it is turned off. Playwright's setOffline cuts the page and its
+   worker but not the offline worker (sw.js), which would quietly go on fetching. */
+const network = { up: true, sockets: new Set() };
+const upstream = process.env.HTTPS_PROXY ? new URL(process.env.HTTPS_PROXY) : null;
+const gate = createServer((req, res) => { res.writeHead(502); res.end(); });
+gate.on('connect', (req, client, head) => {
+  if (!network.up) return client.end('HTTP/1.1 502 Offline\r\n\r\n');
+  const [host, port] = req.url.split(':');
+  const up = upstream ? connect(Number(upstream.port), upstream.hostname) : connect(Number(port) || 443, host);
+  up.on('connect', () => {
+    if (upstream) up.write(`CONNECT ${req.url} HTTP/1.1\r\nHost: ${req.url}\r\n\r\n`);
+    else client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    if (head.length) up.write(head);
+    up.pipe(client);
+    client.pipe(up);
+  });
+  for (const sock of [client, up]) {
+    network.sockets.add(sock);
+    sock.on('error', () => {});
+    sock.on('close', () => network.sockets.delete(sock));
+  }
+});
+await new Promise((r) => gate.listen(0, '127.0.0.1', r));
+const gatedArgs = [`--proxy-server=http://127.0.0.1:${gate.address().port}`, '--proxy-bypass-list=127.0.0.1;localhost'];
+const cutNetwork = () => { network.up = false; for (const sock of network.sockets) sock.destroy(); };
+const ONLY = process.env.PL_ONLY ? process.env.PL_ONLY.split(',').map(Number) : null;
+const want = (part) => !ONLY || ONLY.includes(part);
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
@@ -72,13 +108,32 @@ function y4m(rgba, w, h) {
   return Buffer.concat([Buffer.from(`YUV4MPEG2 W${w} H${h} F30:1 Ip A1:1 C420jpeg\nFRAME\n`), Y, U, V]);
 }
 
+/* The page's longest stall: a 50 ms timer runs while `during` does its work, and the longest gap
+   between its ticks is how long the page stopped responding to taps. */
+async function longestStall(page, during) {
+  await page.evaluate(() => {
+    const g = (window.stall = { last: performance.now(), longest: 0 });
+    g.timer = setInterval(() => { const t = performance.now(); g.longest = Math.max(g.longest, t - g.last); g.last = t; }, 50);
+  });
+  await during();
+  return page.evaluate(() => { clearInterval(window.stall.timer); return Math.round(window.stall.longest); });
+}
+const readPhoto = async (page, png) => {
+  await page.evaluate(() => { window.priceLens.state.prices = []; });
+  await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 120000 }).catch(() => {});
+};
+const mainPrice = (page) => page.evaluate(() => window.priceLens.state.prices.map((p) => [p.amount, p.currency])[0] || null);
+/* the plain words people see: never an exception's own text */
+const RAW_ERROR = /Error|fail(ed)? to fetch|dynamically imported|module|undefined|\bnull\b|HTTP \d|wasm|onnx|ERR_/i;
+
 const tagHtml = (lines) => `<div style="height:100%;display:grid;place-items:center;background:#d9d4c7">
   <div style="background:#fff;border:3px solid #c00;padding:28px 56px;text-align:center;border-radius:10px">${lines}</div></div>`;
 
 const maker = await chromium.launch({ args: proxyArgs });
 
 /* ---------- 1. a photo of a euro tag ---------- */
-{
+if (want(1)) {
   const { png } = await drawTag(maker, tagHtml(`
     <div style="font-size:34px">Bio Vollmilch 1 l</div>
     <div style="font-size:120px;font-weight:bold">1,19 €</div>
@@ -94,8 +149,13 @@ const maker = await chromium.launch({ args: proxyArgs });
   await page.goto(base);
   await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
   check(true, 'exchange rates fetched');
-  await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
-  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 90000 }).catch(() => {});
+  /* the first photo also starts the reader: download, start-up and its self-test */
+  const firstStall = await longestStall(page, () => readPhoto(page, png));
+  const reader = await page.evaluate(() => window.priceLens.reader().engine);
+  check(reader === 'paddle', `reader: PaddleOCR is the default (using ${reader})`);
+  check(firstStall < 200, `responsive: the page never stalls 200 ms while the reader starts and reads (longest ${firstStall} ms)`);
+  const stall = await longestStall(page, () => readPhoto(page, png));
+  check(stall < 200, `responsive: nor while a photo is read (longest ${stall} ms)`);
   await page.waitForTimeout(400); // let the labels finish appearing before the screenshot
   const r = await page.evaluate(() => ({
     lines: window.priceLens.state.lines.map((l) => l.text),
@@ -122,7 +182,7 @@ const maker = await chromium.launch({ args: proxyArgs });
 }
 
 /* ---------- 2. the camera, aimed at a pound tag ---------- */
-{
+if (want(2)) {
   const W = 720, H = 1280; // a phone held upright
   const { png, rgba } = await drawTag(maker, `<div style="height:100%;background:#d9d4c7;padding-top:250px;box-sizing:border-box">
     <div style="width:440px;margin:0 auto;background:#fff;border:3px solid #c00;padding:18px 0;text-align:center;border-radius:10px">
@@ -203,7 +263,7 @@ const maker = await chromium.launch({ args: proxyArgs });
 }
 
 /* ---------- 3. zoom and flashlight, on a camera that has them ---------- */
-{
+if (want(3)) {
   const video = join(OUT, 'tag-gbp.y4m');
   const browser = await chromium.launch({
     args: [...proxyArgs, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`],
@@ -246,7 +306,7 @@ const maker = await chromium.launch({ args: proxyArgs });
 }
 
 /* ---------- 4. GPS beats the time zone: phone still on London time, but in Tokyo ---------- */
-{
+if (want(4)) {
   const { png } = await drawTag(maker, tagHtml(`
     <div style="font-size:30px">Matcha Kit Kat</div>
     <div style="font-size:120px;font-weight:bold">298</div>`), 900, 700);
@@ -277,7 +337,85 @@ const maker = await chromium.launch({ args: proxyArgs });
   await browser.close();
 }
 
+/* ---------- 5. PaddleOCR cannot be downloaded: the standard reader takes over ---------- */
+if (want(5)) {
+  const { png } = await drawTag(maker, tagHtml(`
+    <div style="font-size:34px">Bio Vollmilch 1 l</div>
+    <div style="font-size:120px;font-weight:bold">1,19 €</div>
+    <div style="font-size:24px">Art. 40213</div>`), 900, 700);
+  const browser = await chromium.launch({ args: proxyArgs });
+  /* no offline worker here, so every request of the reader's worker meets the block */
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-US', timezoneId: 'America/New_York', serviceWorkers: 'block' });
+  const blocked = [];
+  await ctx.route(/onnxruntime-web|light-ocr-model/, (route) => { blocked.push(route.request().url()); return route.abort(); });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.goto(base);
+  await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
+  await readPhoto(page, png);
+  const r = await page.evaluate(() => ({ reader: window.priceLens.reader().engine, hint: document.getElementById('hint').textContent }));
+  const price = await mainPrice(page);
+  await page.click('#settings-btn');
+  const note = await page.textContent('#reader-line');
+  console.log('  ', JSON.stringify({ ...r, price, note, blocked: blocked.length }));
+  check(blocked.length > 0, 'fallback: the PaddleOCR downloads were blocked');
+  check(r.reader === 'tesseract', 'fallback: the app switches to the standard reader');
+  check(price?.[0] === 1.19 && price?.[1] === 'EUR', 'fallback: and still reads €1.19');
+  check(/^Text reader: standard \(the better reader could not/.test(note) && !RAW_ERROR.test(note), 'fallback: Settings says so in plain words');
+  check(!RAW_ERROR.test(r.hint), `fallback: no technical error on screen ("${r.hint}")`);
+  await page.screenshot({ path: join(OUT, 'fallback-settings.png') });
+  await browser.close();
+}
+
+/* ---------- 6. offline: after one visit, the app reads with no connection ---------- */
+if (want(6)) {
+  const { png } = await drawTag(maker, tagHtml(`
+    <div style="font-size:34px">Bio Vollmilch 1 l</div>
+    <div style="font-size:120px;font-weight:bold">1,19 €</div>
+    <div style="font-size:24px">Art. 40213</div>`), 900, 700);
+  const browser = await chromium.launch({ args: gatedArgs });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-US', timezoneId: 'America/New_York' });
+  /* hold the offline worker back until the reader has started and read, as on a phone whose
+     camera (and so the reader) starts the moment the page opens */
+  let release;
+  swHeld = new Promise((r) => { release = () => { swHeld = null; r(); }; });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.goto(base);
+  await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
+  await readPhoto(page, png);
+  const controlled = await page.evaluate(() => !!navigator.serviceWorker.controller);
+  check(!controlled && (await mainPrice(page))?.[0] === 1.19, 'offline: the first visit reads before the offline worker is in charge');
+  release();
+  /* so the page's list must still get every file stored */
+  /* (polled from here: waitForFunction does not wait on a promise's value) */
+  let stored = null;
+  for (let t = 0; t < 120 && !stored; t++) {
+    stored = await page.evaluate(async () => {
+      const files = window.priceLens.reader().files;
+      const keys = (await (await caches.open('price-lens-cdn')).keys()).map((r) => r.url);
+      return files.length && files.every((f) => keys.includes(f)) ? files : null;
+    });
+    if (!stored) await page.waitForTimeout(500);
+  }
+  check(!!stored, `offline: the reader's files are stored after the first visit (${stored ? stored.length : 0} files)`);
+  /* no network (for the offline worker too) and an empty browser cache: only the offline copy can answer */
+  await (await ctx.newCDPSession(page)).send('Network.clearBrowserCache');
+  cutNetwork();
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
+  const online = await page.evaluate(() => navigator.onLine);
+  await readPhoto(page, png);
+  const price = await mainPrice(page);
+  const reader = await page.evaluate(() => window.priceLens.reader().engine);
+  console.log('  ', JSON.stringify({ online, price, reader }));
+  check(price?.[0] === 1.19 && price?.[1] === 'EUR' && reader === 'paddle', 'offline: after a reload with no network, PaddleOCR still reads €1.19');
+  await browser.close();
+}
+
 await maker.close();
 server.close();
+gate.close();
 console.log(failed ? `\n${failed} failed` : '\nall passed', `(pictures in ${OUT})`);
 process.exit(failed ? 1 : 0);

@@ -4,7 +4,7 @@
   "description": "Point a phone's camera at a price tag and see the price in your own currency, at current exchange rates.",
   "type": "module",
   "scripts": {
-    "test": "node --test test/prices.test.mjs",
+    "test": "node --test test/prices.test.mjs test/paddle.test.mjs",
     "e2e": "node test/e2e.mjs",
     "serve": "npx http-server -c-1 ."
   },

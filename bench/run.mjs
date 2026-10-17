@@ -3,11 +3,12 @@
  *   node bench/run.mjs                       made-up tags (120, seed 1)
  *   node bench/run.mjs --synth 40 --seed 7   fewer, different ones
  *   node bench/run.mjs --real path/to/labels.json --synth 0
- *   node bench/run.mjs --engine paddle       read with PaddleOCR (src/ocr-paddle.js) instead of Tesseract
+ *   node bench/run.mjs --engine paddle       read with PaddleOCR (src/ocr-paddle.js, in its worker) instead of Tesseract
+ *   node bench/run.mjs --engine app          read with whichever the app picks (src/reader.js)
  *   node bench/run.mjs --engine paddle --settings '{"detSide":480}'   with other reader settings
  *   options: --only <regex on case id>  --out results.json  --images <folder to keep the pictures in>
  *
- * Each picture goes through the app's own reading code (src/ocr.js and src/prices.js) in headless
+ * Each picture goes through the app's own reading code (the reader and src/prices.js) in headless
  * Chromium. A case counts as right when the first price the app offers is the tag's selling price,
  * in the right currency. Needs Playwright and a connection (the text reader comes from a CDN). */
 
@@ -54,7 +55,8 @@ benchPage.on('pageerror', (e) => console.error('bench page error:', e.message));
 const query = new URLSearchParams({ ...(ENGINE !== 'tesseract' && { engine: ENGINE }), ...(SETTINGS && { settings: SETTINGS }) });
 await benchPage.goto(`${origin}/bench/bench.html${query.size ? '?' + query : ''}`);
 await benchPage.waitForFunction(() => window.bench, null, { timeout: 20000 });
-await benchPage.evaluate(() => window.bench.ready);
+const started = await benchPage.evaluate(() => window.bench.ready);
+console.log(`reader: ${started.reader}, started in ${started.ms} ms${started.parts ? ` (files ${started.parts.files} ms, runtime and models ${started.parts.start} ms)` : ''}`);
 const drawPage = await ctx.newPage();
 if (IMAGES) await mkdir(IMAGES, { recursive: true });
 

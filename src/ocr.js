@@ -1,7 +1,8 @@
 /* Price Lens: reading text off a picture, on the phone itself.
  *
  * Uses Tesseract (compiled to WebAssembly). The reader and its English model (about 4 MB in all)
- * are fetched the first time and kept by the offline worker, so later scans need no connection. */
+ * are fetched the first time and kept by the offline worker, so later scans need no connection.
+ * This is the standard reader: src/reader.js uses it on phones that cannot run PaddleOCR. */
 
 const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 const PATHS = {
@@ -11,6 +12,15 @@ const PATHS = {
 };
 
 let workerPromise = null;
+
+/* The files the reader fetches, to keep for offline use: Tesseract's worker loads the core built
+   with SIMD where WebAssembly has it, and the plain one elsewhere. */
+const SIMD_TEST = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+export function readerFiles() {
+  let simd = false;
+  try { simd = WebAssembly.validate(SIMD_TEST); } catch {}
+  return [TESSERACT, PATHS.workerPath, `${PATHS.corePath}/tesseract-core-${simd ? 'simd-' : ''}lstm.wasm.js`, `${PATHS.langPath}/eng.traineddata.gz`];
+}
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
