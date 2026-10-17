@@ -174,3 +174,120 @@ test('prices nearer the middle of the box rank higher', () => {
   const center = { x: 450, y: 215, reach: 600 };
   assert.equal(findPrices(lines, { local: 'USD', center })[0].amount, 5.49);
 });
+
+/* what the English text reader makes of signs it does not know */
+const line = (text, local) => findPricesInLine(text, { local }).map((p) => [p.amount, p.currency, p.explicit]);
+
+test('the local sign misread as another sign or as letters', () => {
+  assert.deepEqual(top('¥1,680', 'INR'), [1680, 'INR']); // ₹ read as ¥
+  assert.deepEqual(top('¥ 937', 'INR'), [937, 'INR']);
+  assert.deepEqual(top('X 1,993', 'INR'), [1993, 'INR']);
+  assert.deepEqual(top('< 980', 'INR'), [980, 'INR']);
+  assert.deepEqual(top('B283', 'THB'), [283, 'THB']); // ฿ read as B or $
+  assert.deepEqual(top('was $947', 'THB'), [947, 'THB']);
+  assert.deepEqual(top('570M', 'JPY'), [570, 'JPY']); // 円 read as M, H or F
+  assert.deepEqual(top('485H', 'JPY'), [485, 'JPY']);
+  assert.deepEqual(top('96,19 zi', 'PLN'), [96.19, 'PLN']); // zł
+  assert.deepEqual(top('38,49 zt', 'PLN'), [38.49, 'PLN']);
+  assert.deepEqual(line('104,69 21', 'PLN'), [[104.69, 'PLN', true]]); // the 21 is the sign, not another number
+  assert.deepEqual(top('389,49 K', 'CZK'), [389.49, 'CZK']); // Kč
+  assert.deepEqual(top('618.49 K&', 'CZK'), [618.49, 'CZK']);
+  assert.deepEqual(top('721,29 K¢', 'CZK'), [721.29, 'CZK']);
+  assert.deepEqual(top('12,50 E', 'EUR'), [12.5, 'EUR']); // €
+  assert.deepEqual(top('£21,94', 'EUR'), [21.94, 'EUR']);
+  assert.deepEqual(top('E3.99', 'GBP'), [3.99, 'GBP']); // £
+  assert.deepEqual(top('HF 15.37', 'CHF'), [15.37, 'CHF']);
+  assert.deepEqual(top('10: -', 'SEK'), [10, 'SEK']); // 10:-
+  assert.deepEqual(top('45,90 Kr', 'NOK'), [45.9, 'NOK']);
+  const [p] = findPrices('570M', { local: 'JPY' });
+  assert.equal(p.explicit, true);
+  assert.equal(p.shared, true); // so the app says "M read as JPY"
+});
+
+test('a misread sign only counts where it is the local sign', () => {
+  assert.deepEqual(top('¥1,680', 'JPY'), [1680, 'JPY']);
+  assert.deepEqual(top('$947', 'USD'), [947, 'USD']);
+  assert.deepEqual(line('B283', 'USD'), [[283, 'USD', false]]);
+  assert.deepEqual(line('96,19 zi', 'EUR'), [[96.19, 'EUR', false]]);
+  assert.deepEqual(line('570M', 'EUR'), []);
+});
+
+test('a misread sign needs a number that looks like a whole price', () => {
+  assert.deepEqual(line('5 M', 'JPY'), []); // a size
+  assert.deepEqual(line('12 E', 'EUR'), [[12, 'EUR', false]]); // no cents: E is not taken for €
+  assert.deepEqual(line('14759 zi', 'PLN'), []); // no cents: a count, as "80 bags"
+  assert.deepEqual(line('4K', 'CZK'), []);
+  assert.deepEqual(line('6 X 125 g', 'INR'), []); // a pack size, not rupees
+  assert.deepEqual(line('< 500 g', 'INR'), []);
+  assert.deepEqual(line('£2194 /kg', 'EUR'), [[2194, 'EUR', false]]);
+});
+
+test('a stray pound sign only counts where the pound is used', () => {
+  assert.deepEqual(line('£44', 'MXN'), [[44, 'MXN', false]]);
+  assert.deepEqual(top('£44', 'GBP'), [44, 'GBP']);
+  assert.deepEqual(top('£3.99'), [3.99, 'GBP']);
+});
+
+test('pence and cents', () => {
+  assert.deepEqual(top('75p', 'GBP'), [0.75, 'GBP']);
+  assert.deepEqual(top('Now 99p', 'GBP'), [0.99, 'GBP']);
+  assert.deepEqual(top('79¢', 'USD'), [0.79, 'USD']);
+  assert.deepEqual(top('79¢', 'CAD'), [0.79, 'CAD']);
+  assert.deepEqual(top('79¢'), [0.79, 'USD']);
+  assert.notDeepEqual(top('75p', 'EUR'), [0.75, 'EUR']);
+  assert.deepEqual(line('6 pcs', 'GBP'), []);
+});
+
+test('cents garbled by the reader give no price, not the whole part', () => {
+  assert.deepEqual(line('98% zt', 'PLN'), []);
+  assert.deepEqual(line('541°', 'CZK'), []);
+  assert.deepEqual(line('24”', 'MXN'), []);
+  assert.deepEqual(line('36” kr', 'NOK'), []);
+  assert.deepEqual(line('CHF 38.8¢', 'CHF'), []);
+  assert.deepEqual(line('46+ €', 'EUR'), []);
+  assert.deepEqual(line('€38,7', 'EUR'), []); // a digit lost
+  assert.deepEqual(line('$6.9', 'USD'), []);
+  assert.deepEqual(line('$40.', 'USD'), []); // the cents read as a line of their own
+  assert.deepEqual(top('12.–', 'CHF'), [12, 'CHF']);
+  assert.deepEqual(top('12. -', 'CHF'), [12, 'CHF']);
+  /* where tags show no cents, a mark after the number is just a misread sign */
+  assert.deepEqual(top('271»', 'SEK'), [271, 'SEK']);
+  assert.deepEqual(top('12!', 'INR'), [12, 'INR']);
+});
+
+test('cents split off with a space', () => {
+  assert.deepEqual(top('€17, 79'), [17.79, 'EUR']);
+  assert.deepEqual(top('$40 .50', 'USD'), [40.5, 'USD']);
+  assert.deepEqual(top('182, 00 kr', 'NOK'), [182, 'NOK']);
+  assert.deepEqual(top('CHF 44 89'), [44.89, 'CHF']);
+  assert.deepEqual(top('259 50 K¢&', 'CZK'), [259.5, 'CZK']);
+  const tag = [{ text: 'Cheddar Cheese 400 g', height: 30 }, { text: '17 19', height: 140 }];
+  assert.deepEqual(top(tag, 'EUR'), [17.19, 'EUR']);
+  /* not elsewhere: small text with no sign is a list, and 1 299 is a thousand */
+  assert.deepEqual(findPrices([{ text: '€4.99', height: 40 }, { text: 'Sizes 38, 40', height: 10 }], { local: 'EUR' }).map((p) => p.amount), [4.99]);
+  assert.deepEqual(top('1 299 €'), [1299, 'EUR']);
+  assert.deepEqual(top('2 x 1 299 €'), [1299, 'EUR']);
+  assert.deepEqual(top('¥1 980', 'JPY'), [1980, 'JPY']);
+});
+
+test('codes, article numbers and pack sizes', () => {
+  assert.deepEqual(line('Art, 97395', 'JPY'), []);
+  assert.deepEqual(line('Art   43435', 'JPY'), []);
+  assert.deepEqual(line('An 31537', 'JPY'), []); // five digits with no separator
+  assert.deepEqual(line('18990', 'KRW'), [[18990, 'KRW', false]]); // where prices run that long
+  assert.deepEqual(line('Greek Yogurt 4x125 9', 'PLN'), []);
+  assert.deepEqual(line('08', 'EUR'), []);
+  assert.deepEqual(line('¥2', 'JPY'), []);
+  assert.deepEqual(line('Orange Juice 1.5 |', 'JPY'), []); // no cents in yen: "1.5" is not ¥15
+  assert.deepEqual(line('19   zt', 'PLN'), []);
+});
+
+test('a unit price comes after the price to pay', () => {
+  const tag = [{ text: '11,95', height: 100 }, { text: '€42,38 per 100g', height: 28 }];
+  assert.deepEqual(findPrices(tag, { local: 'EUR' }).map((p) => p.amount), [11.95, 42.38]);
+  const tag2 = [{ text: '21.79', height: 90 }, { text: '$59.23 /kg', height: 30 }];
+  assert.deepEqual(findPrices(tag2, { local: 'CAD' }).map((p) => p.amount), [21.79, 59.23]);
+  const [p] = findPricesInLine('1 l = 1,19 €', { local: 'EUR' }).filter((q) => q.amount === 1.19);
+  assert.equal(p.unit, true);
+  assert.equal(findPricesInLine('$3.99 /ea', { local: 'USD' })[0].unit, false);
+});

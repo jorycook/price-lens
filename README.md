@@ -16,17 +16,19 @@ It's a web app with no build step. Open it in Safari or Chrome on a phone and ad
    - currency signs before or after the number (`€12,50`, `12.50 CHF`, `1,980円`, `R$ 49,90`, `49:-`), plus ISO codes
    - thousands and decimal separators in every local style: `1,234.56`, `1.234,56`, `1 234,56`, `12'500`, `12,-`
    - currencies that have no cents (`¥1.980` is 1980)
-   - common misreadings (O for 0, l for 1)
+   - common misreadings (O for 0, l for 1), and signs the reader gets wrong where that currency is the local one: `₹` read as `¥` or `X`, `円` as `M`, `zł` as `zi`, `Kč` as `K¢`, `฿` as `B`. A misread sign only counts next to a number that already looks like a whole price (`12,50 E` is euros, `12 E` and `5 M` are not)
+   - pence and cents (`75p`, `79¢`), and cents split off by a space (`€17, 79`, or `17 19` as the biggest text)
    - weights, volumes, percentages, dates, times, article numbers, barcodes and counts ("80 bags"), which it skips
+   - cents the reader could not make out (`98% zł`, `541°`, `€38,7`): rather than show the whole part as the price, it shows nothing, so you can move closer and try again
 
-   A number with no currency sign has to look like money: cents in the local style, the biggest text on the tag, or, for currencies without cents such as yen, 10 or more. Numbers the reader wasn't sure of need a sign. When a tag shows several prices, the one in the biggest letters, nearest the middle of the box, comes first. Tap another price to pick it instead.
+   A number with no currency sign has to look like money: cents in the local style, the biggest text on the tag, or, for currencies without cents such as yen, 10 or more. Numbers the reader wasn't sure of need a sign. When a tag shows several prices, the one in the biggest letters, nearest the middle of the box, comes first; a price per kilo or per 100 g comes after the price to pay. Tap another price to pick it instead.
 
    In **Live** mode a price appears only once it has been read in 2 of the last 4 frames, and the price shown big stays until it leaves the picture, so it doesn't jump between numbers as the camera moves.
 4. **Which currency.** Tags that show no sign, or a shared sign (`$`, `¥`, `kr`), are read in the currency of the country you're in. On *Automatic*, the country comes from:
    - **your phone's time zone**, right away: phones change it by themselves when you land in a new country, and it needs no permission and no connection.
    - **GPS**, if you allow it (Settings → *Find my country with GPS*): more exact near borders, and right even if the clock hasn't changed. Only a rounded position (about 10 km) is sent to [BigDataCloud](https://www.bigdatacloud.com/free-api/free-reverse-geocode-to-city-api)'s free lookup to get the country. Once allowed, it's checked every time the app opens.
 
-   The internet address is not used, because phones roaming abroad usually still show their home country. You can also pick the tag currency by hand. Signs that are also ordinary letters (`R`, `Ft`, `RM`, `kr`, `TL`…) and codes that are also English words (`ALL`, `TOP`, `PEN`) only count where that currency is the local one, so a stray letter can't switch the currency.
+   The internet address is not used, because phones roaming abroad usually still show their home country. You can also pick the tag currency by hand. Signs that are also ordinary letters (`R`, `Ft`, `RM`, `kr`, `TL`…) and codes that are also English words (`ALL`, `TOP`, `PEN`) only count where that currency is the local one, so a stray letter can't switch the currency. So does `£`, which the reader also makes out of smudges.
 5. **Exchange rates** (`src/rates.js`). Rates come from [ExchangeRate-API's open endpoint](https://www.exchangerate-api.com/docs/free), which covers about 160 currencies and updates daily. If that fails, they come from [Frankfurter](https://frankfurter.dev), which has the ECB reference rates. Neither source needs a key. Rates are fetched again once they're more than an hour old, and the last set is kept on the phone for offline use. Every result shows the rate it used and when that rate was published.
 
 These are mid-market reference rates. What your card or a cash exchange actually charges will differ by its fee.
@@ -94,7 +96,7 @@ node bench/run.mjs --engine paddle --settings '{"boxThresh":0.4}'   # try other 
 - A tag held upside down is misread. Text turned on its side is read.
 - On iPhones with iOS 16.4 to 17, opening and closing the app many times can leave too little memory for PaddleOCR to start (a WebKit bug with WebAssembly memory). The app then uses the standard reader until it is opened again.
 - Small, curved, glossy or blurry tags read poorly. Move closer so the price fills the box, and avoid glare.
-- Cents printed small and raised (4⁹⁹) may come out as 499. Check against the original amount, which is always shown under the converted price.
+- Cents printed small and raised (4⁹⁹) may come out as 499, or as 4° (then no price is shown). Check against the original amount, which is always shown under the converted price.
 
 ## Credits and licences
 
