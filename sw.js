@@ -4,7 +4,7 @@
  * (and its reader's worker) start before this worker controls them. Exchange rates are not
  * handled here: the page keeps the last ones itself and says how old they are.
  * Change VERSION whenever a file of the page changes, so phones pick up the new copy. */
-const VERSION = 'price-lens-4';
+const VERSION = 'price-lens-5';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
   './src/app.js', './src/prices.js', './src/rates.js', './src/location.js', './src/camera.js', './src/zones.js', './src/styles.css',

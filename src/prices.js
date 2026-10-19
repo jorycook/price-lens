@@ -73,14 +73,16 @@ const MEASURE_AFTER = /^\s?(?:%|°|(?:kg|g|gr|mg|lbs?|oz|ml|cl|l|ltr|cm|mm|m|km)
 const NOT_PRICE_BEFORE = /(?:(?:№|#|no\.?|ref\.?|tel\.?|\+|\d[-./:]|\d\s?[x×])\s?|art[.,]?\s*)$/i;
 
 /* Common misreadings inside numbers: O for 0, l or I for 1, S for 5, B for 8 — only between digits
-   or right after a currency mark, so ordinary words are left alone. */
+   or right after a currency mark, so ordinary words are left alone. (The digit before is captured
+   and put back rather than looked behind for: Safari before 16.4 has no lookbehind, and a regular
+   expression it cannot parse would stop the whole app from loading.) */
 function cleanDigits(text) {
   return text
-    .replace(/(?<=\d)[Oo](?=[\d.,]|\b)/g, '0')
-    .replace(/(?<=[\d.,])[Oo](?=\d)/g, '0')
-    .replace(/(?<=\d[.,]?)[lI|](?=\d)/g, '1')
-    .replace(/(?<=\d)[S](?=\d)/g, '5')
-    .replace(/(?<=\d)[B](?=\d)/g, '8')
+    .replace(/(\d)[Oo](?=[\d.,]|\b)/g, '$10')
+    .replace(/([\d.,])[Oo](?=\d)/g, '$10')
+    .replace(/(\d[.,]?)[lI|](?=\d)/g, '$11')
+    .replace(/(\d)[S](?=\d)/g, '$15')
+    .replace(/(\d)[B](?=\d)/g, '$18')
     .replace(/[，]/g, ',').replace(/[．]/g, '.')
     .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xFF10 + 48));
 }
@@ -231,11 +233,12 @@ export function findPricesInLine(line, options = {}) {
   const markOk = (word) => (!LOCAL_ONLY.has(word) || (local && MARKS[word].includes(local))) && (!SMUDGE_MARKS.has(word) || isLocal(word));
   const text = joinCents(cleanDigits(line), local, !!options.big);
   const found = [];
-  const numRe = new RegExp(`(?<![\\d.,])(?:${NUM})${DASH_END}(?![\\d])`, 'g');
+  /* a number not glued to a digit or separator before it (that character is matched and skipped, not looked behind for) */
+  const numRe = new RegExp(`(^|[^\\d.,])((?:${NUM})${DASH_END})(?![\\d])`, 'g');
   let m;
   while ((m = numRe.exec(text))) {
-    const raw = m[0];
-    const start = m.index, end = start + raw.length;
+    const raw = m[2];
+    const start = m.index + m[1].length, end = start + raw.length;
     const before = text.slice(Math.max(0, start - 6), start);
     const after = text.slice(end, end + 6);
 

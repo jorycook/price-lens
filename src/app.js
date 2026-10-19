@@ -51,7 +51,11 @@ const state = {
   frozen: false,      // a still is on screen (a captured frame or a chosen photo)
   photo: false,       // the still is a chosen photo (shown whole) rather than a camera frame
   busy: false,
+  reading: null,      // the read in flight, as a promise (a chosen photo waits for it)
+  waiting: false,     // a scan is waiting for the reader to start (the first scan of a visit)
+  waitRun: 0,
   prices: [],
+  pricesFrom: null,   // 'still' or 'video': the picture the prices were read off, which their labels belong to
   pick: 0,
   pickKey: null,      // the price shown big; in live mode it stays while it is in view
   locked: false,      // the person tapped a price to choose it
@@ -190,14 +194,39 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+/* The download's progress, on screen: the reader takes a while to load the first time, and on a
+   slow connection the person may well tap Scan long before it is ready. */
+const READY_HINT = 'Getting the text reader ready…';
+const READER_FAILED = 'The text reader could not start. Check the connection and try again.';
+const readerProgress = (p) => { if (p < 1) setHint(`${READY_HINT} ${Math.round(p * 100)}%`); };
+
 /* the reader takes a few seconds to load the first time; start it while the person aims */
 function warmUp() {
-  getReader((p) => {
-    if (!state.busy && p < 1) setHint(`Getting the text reader ready… ${Math.round(p * 100)}%`);
-  }).then(() => {
-    if (!state.busy && !state.prices.length) setHint(state.photo ? '' : AIM_HINT);
-  }).catch((err) => setHint(plainError(err, 'The text reader could not start. Check the connection and try again.')));
+  getReader(readerProgress).then(() => {
+    if (!state.busy && !state.waiting && !state.prices.length) setHint(state.photo ? '' : AIM_HINT);
+  }).catch((err) => setHint(plainError(err, READER_FAILED)));
 }
+
+/* The first scan of a visit can come while the reader is still downloading. This waits for it,
+   with the progress on screen and the buttons free: a photo chosen or Again tapped meanwhile
+   takes over, and the waiting scan is dropped. Resolves false when dropped, or when no reader
+   could start (the hint then says so). */
+async function awaitReader() {
+  if (readerInfo().engine) return true;
+  const run = ++state.waitRun;
+  state.waiting = true;
+  if (!el.hint.textContent.startsWith(READY_HINT)) setHint(READY_HINT);
+  try {
+    await getReader(readerProgress);
+  } catch (err) {
+    if (run === state.waitRun) setHint(plainError(err, READER_FAILED));
+    return false;
+  } finally {
+    if (run === state.waitRun) state.waiting = false;
+  }
+  return run === state.waitRun;
+}
+const dropWait = () => { state.waitRun++; state.waiting = false; };
 
 /* What people see of an error: our own sentences, never the browser's technical wording */
 function plainError(err, fallback) {
@@ -223,6 +252,7 @@ function freezeFrame(frame) {
 }
 
 function unfreeze() {
+  dropWait(); // a scan waiting for the reader was to read this still
   state.frozen = false;
   state.photo = false;
   el.still.hidden = true;
@@ -239,18 +269,24 @@ function readPrices(lines, region) {
 /* Reads the aiming box of the picture on screen, or of a camera frame handed over by live mode. */
 async function scan({ quiet = false, from = null } = {}) {
   if (state.busy) return null;
+  if (!(await awaitReader()) || state.busy) return null;
   const [sw] = from ? [from.width] : sourceSize();
   if (!sw) return null;
   state.busy = true;
+  let done;
+  state.reading = new Promise((r) => { done = r; });
   el.reticle.classList.add('busy');
   el.shutter.disabled = !state.live;
   if (!quiet) setHint('Reading…');
   try {
+    /* the picture and the region are taken now, after any wait: what is on screen now is what is read */
     const region = from ? boxIn(from.width, from.height) : scanRegion();
     if (region.w < 20 || region.h < 20) return null;
+    const fromStill = !from && state.frozen;
     const lines = await readLines(from || source(), region);
     state.lines = lines;
     state.region = region;
+    state.pricesFrom = fromStill ? 'still' : 'video';
     let prices = readPrices(lines, region);
     if (state.live) {
       prices = steady(prices);
@@ -271,11 +307,14 @@ async function scan({ quiet = false, from = null } = {}) {
     return prices;
   } catch (err) {
     setHint(plainError(err, 'Could not read the picture. Try again.'));
+    /* no reader at all (nothing could be downloaded): live mode must not go on trying frame after frame */
+    if (state.live && !readerInfo().engine) setLive(false);
     return null;
   } finally {
     state.busy = false;
     el.reticle.classList.remove('busy');
     el.shutter.disabled = false;
+    done();
   }
 }
 
@@ -322,7 +361,8 @@ function rereadLast() {
 }
 
 /* The Scan button: let the shake of the tap settle, keep the sharpest frame of a short burst,
-   show it as a still and read it. */
+   show it as a still and read it. The button is free again as soon as the still is up: while the
+   reader is still downloading, Again drops the scan. */
 async function shoot() {
   if (state.busy || state.shooting || !el.video.videoWidth) return;
   state.shooting = true;
@@ -334,11 +374,12 @@ async function shoot() {
     if (!state.stream || state.live) return;
     freezeFrame(shot.canvas);
     updateShutter();
-    await scan();
   } finally {
     state.shooting = false;
     el.shutter.disabled = false;
+    el.reticle.classList.remove('busy');
   }
+  await scan();
 }
 
 /* ---------- live mode: keep reading the moving picture ---------- */
@@ -349,6 +390,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
    frame since the last read, and the reticle turns green while the phone is held steady. */
 async function liveLoop() {
   const run = ++state.liveRun;
+  /* on a first visit the reader may still be downloading; frames are worth taking once it is ready */
+  if (!(await awaitReader())) { if (run === state.liveRun && state.live) setLive(false); return; }
+  if (!state.live || run !== state.liveRun) return;
+  if (!state.prices.length) setHint('Reading continuously…');
   let misses = 0;
   state.gate?.stop();
   const gate = (state.gate = frameGate(el.video, videoBox, (steady) => el.reticle.classList.toggle('steady', steady)));
@@ -405,6 +450,7 @@ async function usePhoto(file) {
       img.src = URL.createObjectURL(file);
     });
   }
+  await state.reading; // a read in flight finishes with its own picture first
   const w = bitmap.width, h = bitmap.height;
   const k = Math.min(1, 2400 / Math.max(w, h));
   el.still.width = Math.round(w * k);
@@ -455,6 +501,8 @@ const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
 function drawLabels(prices) {
   el.labels.replaceChildren();
+  /* prices read off a still belong on that still: once it has gone, so have their labels */
+  if (state.pricesFrom === 'still' && !state.frozen) return;
   const f = fitOf();
   const s = el.stage.getBoundingClientRect();
   const placed = [];
@@ -645,7 +693,14 @@ $('type-btn').addEventListener('click', openTyper);
 $('type-btn-2').addEventListener('click', openTyper);
 el.typerInput.addEventListener('input', typed);
 const openSettings = () => { fillSelects(); renderRates(); el.readerLine.textContent = readerNote(); el.settings.showModal(); };
-onReaderChange((note) => { el.readerLine.textContent = note; });
+/* Settings' line about the reader; and the progress on screen, which a change of reader makes stale */
+onReaderChange((note) => {
+  el.readerLine.textContent = note;
+  if (!el.hint.textContent.startsWith(READY_HINT)) return;
+  if (!readerInfo().engine) setHint(READY_HINT);
+  else if (state.busy) setHint(state.live ? (state.prices.length ? '' : 'Reading continuously…') : 'Reading…');
+  else if (!state.waiting) setHint(state.prices.length || state.photo ? '' : AIM_HINT);
+});
 $('settings-btn').addEventListener('click', openSettings);
 $('to-btn').addEventListener('click', () => { openSettings(); el.toSelect.focus(); });
 $('from-btn').addEventListener('click', () => { openSettings(); el.fromSelect.focus(); });

@@ -6,8 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   findBoxes, toSource, boxHeight, boxLength, turned, cropWidth, cropTransform, extent,
-  letterHeight, assemble, decode,
+  letterHeight, inkMask, assemble, decode,
 } from '../src/paddle-boxes.js';
+import { watchdog } from '../src/ocr-paddle.js';
 
 const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a} is not within ${tol} of ${b}`);
 const apply = ([a, b, c, d, e, f], x, y) => [a * x + c * y + e, b * x + d * y + f];
@@ -92,6 +93,61 @@ test('letter height is the ink across the middle, not the box, and not the lines
   const long = crop(600, [[14, 33], [0, 3], [45, 47]]); // bits of the neighbouring lines at the edges
   assert.equal(letterHeight(readAcross(80), short), 20);
   assert.equal(letterHeight(readAcross(600), long), 20);
+});
+
+test('the part of a crop that reached past the picture (transparent) is not ink, so it does not stretch the letters', () => {
+  /* a crop whose box ran past the top edge of the snapshot: the first 12 rows were never drawn */
+  const img = crop(80, [[14, 33]]);
+  for (let i = 0; i < 12 * 80; i++) img.data.fill(0, i * 4, i * 4 + 4);
+  assert.equal(letterHeight(readAcross(80), img), 20);
+  const mask = inkMask(img);
+  assert.equal(mask.slice(0, 12 * 80).reduce((a, b) => a + b, 0), 0, 'nothing in the transparent rows is ink');
+  /* light letters on a dark tag, same cut: the border vote ignores the transparent rows too */
+  const dark = crop(80, [[14, 33]]);
+  for (let i = 0; i < 80 * 48; i++) { const v = dark.data[i * 4] ? 0 : 255; dark.data[i * 4] = dark.data[i * 4 + 1] = dark.data[i * 4 + 2] = v; }
+  for (let i = 0; i < 12 * 80; i++) dark.data.fill(0, i * 4, i * 4 + 4);
+  assert.equal(letterHeight(readAcross(80), dark), 20);
+});
+
+test('the watchdog gives the worker its full time again after the page slept, and while it is hidden', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let clock = 0;
+  const now = () => clock;
+  /* awake all along: it fires once nothing was heard for the limit */
+  let fired = 0;
+  const a = watchdog(3000, () => fired++, now);
+  for (let i = 0; i < 2; i++) { clock += 1000; t.mock.timers.tick(1000); }
+  assert.equal(fired, 0);
+  a.heard();
+  for (let i = 0; i < 2; i++) { clock += 1000; t.mock.timers.tick(1000); }
+  assert.equal(fired, 0, 'a sign of life resets it');
+  clock += 1000; t.mock.timers.tick(1000);
+  assert.equal(fired, 1, 'then it fires after the limit');
+  /* asleep: the clock jumps 25 s between two looks (the page and its worker were suspended) */
+  fired = 0;
+  const b = watchdog(3000, () => fired++, now);
+  clock += 1000; t.mock.timers.tick(1000);
+  clock += 25000; t.mock.timers.tick(1000);
+  assert.equal(fired, 0, 'the jump is not held against the worker');
+  clock += 1000; t.mock.timers.tick(1000);
+  clock += 1000; t.mock.timers.tick(1000);
+  assert.equal(fired, 0, 'it counts afresh from the wake-up');
+  clock += 1000; t.mock.timers.tick(1000);
+  assert.equal(fired, 1);
+  b.clear();
+  /* hidden: nothing counts until the page is visible again */
+  fired = 0;
+  globalThis.document = { hidden: true };
+  const c = watchdog(3000, () => fired++, now);
+  for (let i = 0; i < 6; i++) { clock += 1000; t.mock.timers.tick(1000); }
+  assert.equal(fired, 0, 'hidden, it never fires');
+  globalThis.document.hidden = false;
+  for (let i = 0; i < 2; i++) { clock += 1000; t.mock.timers.tick(1000); }
+  assert.equal(fired, 0);
+  clock += 1000; t.mock.timers.tick(1000);
+  assert.equal(fired, 1, 'visible again, it fires after the full limit');
+  c.clear();
+  delete globalThis.document;
 });
 
 test('raised cents in a box of their own join the price only when their letters are smaller', () => {

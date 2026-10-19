@@ -3,23 +3,24 @@
  * Draws price tags, then (1) hands one to the page as a photo and (2) plays another to the page as
  * its camera, and checks the price is read and converted, with the default reader (PaddleOCR, in
  * its worker) while the page keeps responding. Then (5) blocks that reader's downloads, to check
- * the app falls back to Tesseract, and (6) cuts the network after one visit, to check it still
- * reads offline. Needs Playwright with Chromium, and a connection (the text reader and the
- * exchange rates come from the web).
+ * the app falls back to Tesseract and tries PaddleOCR again later, (6) cuts the network after one
+ * visit, to check it still reads offline, (7) jumps the clock as if the app had been switched away
+ * from, and (8) taps Scan during a slow first download. Needs Playwright with Chromium, and a
+ * connection (the text reader and the exchange rates come from the web).
  *
  *   node test/e2e.mjs            (from the price-lens folder)
  *   PL_ONLY=5,6 node test/e2e.mjs  only some of the parts below */
 
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
+import { extname, join, normalize, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { connect } from 'node:net';
 
 const { chromium } = await import('playwright').catch(() => createRequire(import.meta.url)('playwright'));
 const ROOT = new URL('..', import.meta.url).pathname;
-const OUT = process.env.PL_OUT || join(tmpdir(), 'price-lens-e2e');
+const OUT = resolve(process.env.PL_OUT || join(tmpdir(), 'price-lens-e2e')); // absolute: Chromium gets the camera's file by this path
 await mkdir(OUT, { recursive: true });
 
 /* a tiny static server for the app; it can hold back the offline worker's script (see part 6) */
@@ -118,11 +119,40 @@ async function longestStall(page, during) {
   await during();
   return page.evaluate(() => { clearInterval(window.stall.timer); return Math.round(window.stall.longest); });
 }
+/* hands the page a photo and waits for a price, or for the hint to say why there is none */
 const readPhoto = async (page, png) => {
-  await page.evaluate(() => { window.priceLens.state.prices = []; });
+  await page.evaluate(() => { window.priceLens.state.prices = []; document.getElementById('hint').textContent = ''; });
   await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
-  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 120000 }).catch(() => {});
+  await page.waitForFunction(() => window.priceLens.state.prices.length > 0 || /could not|No text|No price/.test(document.getElementById('hint').textContent), null, { timeout: 120000 }).catch(() => {});
 };
+const hidePage = (hidden) => {
+  Object.defineProperty(document, 'hidden', { get: () => hidden, configurable: true });
+  Object.defineProperty(document, 'visibilityState', { get: () => (hidden ? 'hidden' : 'visible'), configurable: true });
+  document.dispatchEvent(new Event('visibilitychange'));
+};
+/* the camera, when a part needs one: a phone held upright at the pound tag, drawn by part 2 or here */
+const GBP_TAG = `<div style="height:100%;background:#d9d4c7;padding-top:250px;box-sizing:border-box">
+    <div style="width:440px;margin:0 auto;background:#fff;border:3px solid #c00;padding:18px 0;text-align:center;border-radius:10px">
+    <div style="font-size:26px">Earl Grey Tea 80 bags</div>
+    <div style="font-size:100px;font-weight:bold">£3.49</div>
+    <div style="font-size:20px">£4.36 per 100g</div>
+    <div style="font-size:18px;margin-top:8px">Aisle 12 &nbsp; Item 4471 &nbsp; Save 30</div></div></div>`;
+async function cameraArgs(browser) {
+  const video = join(OUT, 'tag-gbp.y4m');
+  try { await access(video); } catch {
+    const { png, rgba } = await drawTag(browser, GBP_TAG, 720, 1280);
+    await writeFile(join(OUT, 'tag-gbp.png'), png);
+    await writeFile(video, y4m(rgba, 720, 1280));
+  }
+  return ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`];
+}
+/* holds one of the reader's files back until released: a slow first download */
+async function holdFile(ctx, pattern) {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await ctx.route(pattern, async (route) => { const res = await route.fetch(); await held; await route.fulfill({ response: res }); });
+  return release;
+}
 const mainPrice = (page) => page.evaluate(() => window.priceLens.state.prices.map((p) => [p.amount, p.currency])[0] || null);
 /* the plain words people see: never an exception's own text */
 const RAW_ERROR = /Error|fail(ed)? to fetch|dynamically imported|module|undefined|\bnull\b|HTTP \d|wasm|onnx|ERR_/i;
@@ -184,19 +214,12 @@ if (want(1)) {
 /* ---------- 2. the camera, aimed at a pound tag ---------- */
 if (want(2)) {
   const W = 720, H = 1280; // a phone held upright
-  const { png, rgba } = await drawTag(maker, `<div style="height:100%;background:#d9d4c7;padding-top:250px;box-sizing:border-box">
-    <div style="width:440px;margin:0 auto;background:#fff;border:3px solid #c00;padding:18px 0;text-align:center;border-radius:10px">
-    <div style="font-size:26px">Earl Grey Tea 80 bags</div>
-    <div style="font-size:100px;font-weight:bold">£3.49</div>
-    <div style="font-size:20px">£4.36 per 100g</div>
-    <div style="font-size:18px;margin-top:8px">Aisle 12 &nbsp; Item 4471 &nbsp; Save 30</div></div></div>`, W, H);
+  const { png, rgba } = await drawTag(maker, GBP_TAG, W, H);
   await writeFile(join(OUT, 'tag-gbp.png'), png);
   const video = join(OUT, 'tag-gbp.y4m');
   await writeFile(video, y4m(rgba, W, H));
 
-  const browser = await chromium.launch({
-    args: [...proxyArgs, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`],
-  });
+  const browser = await chromium.launch({ args: [...proxyArgs, ...(await cameraArgs(maker))] });
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, locale: 'en-GB', timezoneId: 'Europe/London', permissions: ['camera'] });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('page error:', e.message));
@@ -259,15 +282,25 @@ if (want(2)) {
   console.log('   live:', [...new Set(shown)].join(' | '));
   check(shown[0].startsWith('£3.49'), 'live: reads the price on its own');
   check(new Set(shown).size === 1, 'live: the price shown stays steady over 5 seconds');
+
+  /* Scan, then leave the app and come back: the camera restarts, and the labels of the frozen
+     frame must not float over the moving picture */
+  await page.click('#shutter'); // stop live mode
+  await page.waitForFunction(() => !window.priceLens.state.live && !window.priceLens.state.busy, null, { timeout: 10000 });
+  await page.click('#shutter'); // scan
+  await page.waitForFunction(() => window.priceLens.state.frozen && !window.priceLens.state.busy && document.querySelectorAll('#labels .tag').length > 0, null, { timeout: 30000 });
+  await page.evaluate(hidePage, true);
+  await page.evaluate(hidePage, false);
+  await page.waitForFunction(() => window.priceLens.state.stream && !window.priceLens.state.frozen && document.getElementById('video').videoWidth > 0, null, { timeout: 15000 });
+  await page.waitForTimeout(800);
+  const back = await page.evaluate(() => ({ frozen: window.priceLens.state.frozen, labels: document.querySelectorAll('#labels .tag').length, shutter: document.getElementById('shutter-label').textContent }));
+  check(!back.frozen && back.labels === 0 && back.shutter === 'Scan', `camera: back from the background, no labels of the old frame float over the live picture (${JSON.stringify(back)})`);
   await browser.close();
 }
 
 /* ---------- 3. zoom and flashlight, on a camera that has them ---------- */
 if (want(3)) {
-  const video = join(OUT, 'tag-gbp.y4m');
-  const browser = await chromium.launch({
-    args: [...proxyArgs, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`],
-  });
+  const browser = await chromium.launch({ args: [...proxyArgs, ...(await cameraArgs(maker))] });
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-GB', timezoneId: 'Europe/London', permissions: ['camera'] });
   /* the test camera has neither, so pretend it does and record what the app asks of it */
   await ctx.addInitScript(() => {
@@ -337,7 +370,7 @@ if (want(4)) {
   await browser.close();
 }
 
-/* ---------- 5. PaddleOCR cannot be downloaded: the standard reader takes over ---------- */
+/* ---------- 5. PaddleOCR cannot be downloaded: the standard reader takes over, PaddleOCR is tried again later ---------- */
 if (want(5)) {
   const { png } = await drawTag(maker, tagHtml(`
     <div style="font-size:34px">Bio Vollmilch 1 l</div>
@@ -346,17 +379,34 @@ if (want(5)) {
   const browser = await chromium.launch({ args: proxyArgs });
   /* no offline worker here, so every request of the reader's worker meets the block */
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-US', timezoneId: 'America/New_York', serviceWorkers: 'block' });
-  const blocked = [];
-  await ctx.route(/onnxruntime-web|light-ocr-model/, (route) => { blocked.push(route.request().url()); return route.abort(); });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.clock.install(); // so the pause before PaddleOCR's next try can be jumped over
   await page.goto(base);
   await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
+  const readerState = () => page.evaluate(() => ({ reader: window.priceLens.reader().engine, hint: document.getElementById('hint').textContent }));
+
+  /* no connection at all: neither reader loads, and the hint says what to do */
+  await ctx.route(/cdn\.jsdelivr\.net/, (route) => route.abort());
   await readPhoto(page, png);
-  const r = await page.evaluate(() => ({ reader: window.priceLens.reader().engine, hint: document.getElementById('hint').textContent }));
+  const none = await readerState();
+  await page.click('#settings-btn');
+  none.note = await page.textContent('#reader-line');
+  await page.keyboard.press('Escape');
+  console.log('  ', JSON.stringify(none));
+  check(none.reader === null && /could not be downloaded/.test(none.hint) && !RAW_ERROR.test(none.hint), 'no connection: the hint says the reader could not be downloaded, in plain words');
+  check(/^Text reader: none yet/.test(none.note), 'no connection: Settings does not claim a reader is in use');
+  await ctx.unroute(/cdn\.jsdelivr\.net/);
+
+  /* only PaddleOCR's files blocked: the standard reader takes over */
+  const blocked = [];
+  await ctx.route(/onnxruntime-web|light-ocr-model/, (route) => { blocked.push(route.request().url()); return route.abort(); });
+  await readPhoto(page, png);
+  const r = await readerState();
   const price = await mainPrice(page);
   await page.click('#settings-btn');
   const note = await page.textContent('#reader-line');
+  await page.keyboard.press('Escape');
   console.log('  ', JSON.stringify({ ...r, price, note, blocked: blocked.length }));
   check(blocked.length > 0, 'fallback: the PaddleOCR downloads were blocked');
   check(r.reader === 'tesseract', 'fallback: the app switches to the standard reader');
@@ -364,6 +414,21 @@ if (want(5)) {
   check(/^Text reader: standard \(the better reader could not/.test(note) && !RAW_ERROR.test(note), 'fallback: Settings says so in plain words');
   check(!RAW_ERROR.test(r.hint), `fallback: no technical error on screen ("${r.hint}")`);
   await page.screenshot({ path: join(OUT, 'fallback-settings.png') });
+
+  /* the connection is back: the next scan still uses the standard reader (no retry storm), and a
+     scan a minute later brings PaddleOCR back */
+  await ctx.unroute(/onnxruntime-web|light-ocr-model/);
+  const requested = [];
+  page.on('request', (q) => /onnxruntime-web|light-ocr-model/.test(q.url()) && requested.push(q.url()));
+  await readPhoto(page, png);
+  const soon = await readerState();
+  check(soon.reader === 'tesseract' && requested.length === 0, 'retry: right after the failure, the standard reader goes on reading');
+  await page.clock.fastForward(60000);
+  await readPhoto(page, png);
+  const later = await readerState();
+  const laterPrice = await mainPrice(page);
+  console.log('  ', JSON.stringify({ ...later, laterPrice }));
+  check(later.reader === 'paddle' && laterPrice?.[0] === 1.19 && laterPrice?.[1] === 'EUR', 'retry: a minute later, the next scan brings PaddleOCR back and reads €1.19');
   await browser.close();
 }
 
@@ -411,6 +476,88 @@ if (want(6)) {
   const reader = await page.evaluate(() => window.priceLens.reader().engine);
   console.log('  ', JSON.stringify({ online, price, reader }));
   check(price?.[0] === 1.19 && price?.[1] === 'EUR' && reader === 'paddle', 'offline: after a reload with no network, PaddleOCR still reads €1.19');
+  await browser.close();
+}
+
+/* ---------- 7. switched away from while PaddleOCR downloads or reads: it stays the reader ---------- */
+if (want(7)) {
+  const { png } = await drawTag(maker, tagHtml(`
+    <div style="font-size:34px">Bio Vollmilch 1 l</div>
+    <div style="font-size:120px;font-weight:bold">1,19 €</div>
+    <div style="font-size:24px">Art. 40213</div>`), 900, 700);
+  const browser = await chromium.launch({ args: proxyArgs });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-US', timezoneId: 'America/New_York', serviceWorkers: 'block' });
+  const release = await holdFile(ctx, /rec\/inference\.onnx/);
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  page.on('console', (m) => m.type() !== 'log' && console.log('console:', m.text()));
+  /* the page's clock can be jumped forward: a phone suspends the page and its worker while the
+     person is in another app, and the clock keeps running */
+  await page.clock.install();
+  await page.goto(base);
+  await page.waitForFunction(() => window.priceLens?.state.table, null, { timeout: 20000 });
+  await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => /ready… \d+%/.test(document.getElementById('hint').textContent) && window.priceLens.state.waiting, null, { timeout: 60000 });
+  await page.waitForTimeout(2000); // everything but the held file has arrived
+  const during = await page.evaluate(() => ({ hint: document.getElementById('hint').textContent, disabled: document.getElementById('shutter').disabled, busy: window.priceLens.state.busy }));
+  console.log('  ', JSON.stringify(during));
+  check(/^Getting the text reader ready… \d+%$/.test(during.hint) && !during.disabled, 'slow start: the download\'s progress stays on screen while the photo waits for the reader');
+  await page.clock.fastForward(61000); // a minute in another app, mid-download
+  release();
+  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 120000 }).catch(() => {});
+  const r1 = await page.evaluate(() => ({ reader: window.priceLens.reader().engine, why: window.priceLens.reader().why }));
+  const p1 = await mainPrice(page);
+  console.log('  ', JSON.stringify({ ...r1, p1 }));
+  check(r1.reader === 'paddle' && p1?.[0] === 1.19, 'away: a minute away during the first download does not switch the reader');
+  /* 25 s away in the middle of a read */
+  await page.evaluate(() => { window.priceLens.state.prices = []; });
+  await page.setInputFiles('#photo-input-2', { name: 'tag.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => window.priceLens.state.busy, null, { polling: 5, timeout: 10000 });
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(25000);
+  await page.waitForFunction(() => !window.priceLens.state.busy, null, { timeout: 120000 });
+  const r2 = await page.evaluate(() => ({ reader: window.priceLens.reader().engine, why: window.priceLens.reader().why }));
+  const p2 = await mainPrice(page);
+  console.log('  ', JSON.stringify({ ...r2, p2 }));
+  check(r2.reader === 'paddle' && p2?.[0] === 1.19, 'away: 25 s away in the middle of a read does not switch the reader either');
+  await browser.close();
+}
+
+/* ---------- 8. first visit on a slow connection: Scan tapped during the download ---------- */
+if (want(8)) {
+  const { png } = await drawTag(maker, tagHtml(`
+    <div style="font-size:34px">Bio Vollmilch 1 l</div>
+    <div style="font-size:120px;font-weight:bold">1,19 €</div>
+    <div style="font-size:24px">Art. 40213</div>`), 900, 700);
+  const browser = await chromium.launch({ args: [...proxyArgs, ...(await cameraArgs(maker))] });
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, locale: 'en-GB', timezoneId: 'Europe/London', permissions: ['camera'], serviceWorkers: 'block' });
+  const release = await holdFile(ctx, /rec\/inference\.onnx/);
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => console.log('page error:', e.message));
+  await page.goto(base);
+  await page.waitForSelector('#intro', { state: 'hidden', timeout: 10000 }).catch(() => page.click('#start-btn'));
+  await page.waitForFunction(() => document.getElementById('video').videoWidth > 0 && window.priceLens.state.table, null, { timeout: 20000 });
+  await page.waitForFunction(() => /ready… \d+%/.test(document.getElementById('hint').textContent), null, { timeout: 60000 });
+  await page.click('#shutter');
+  await page.waitForFunction(() => window.priceLens.state.frozen && window.priceLens.state.waiting, null, { timeout: 15000 });
+  await page.waitForTimeout(1000);
+  const during = await page.evaluate(() => ({
+    hint: document.getElementById('hint').textContent, shutter: document.getElementById('shutter-label').textContent,
+    disabled: document.getElementById('shutter').disabled, busy: window.priceLens.state.busy,
+  }));
+  console.log('  ', JSON.stringify(during));
+  check(/^Getting the text reader ready… \d+%$/.test(during.hint) && !during.disabled && during.shutter === 'Again', 'slow start: with Scan tapped during the download, the progress stays on screen and the button stays free');
+  /* a photo chosen meanwhile takes over: it is read whole, in its own currency */
+  await page.setInputFiles('#photo-input', { name: 'tag.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => window.priceLens.state.photo, null, { timeout: 10000 });
+  release();
+  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 120000 }).catch(() => {});
+  const r = await page.evaluate(() => ({
+    prices: window.priceLens.state.prices.map((p) => [p.amount, p.currency]), region: window.priceLens.state.region,
+    lines: window.priceLens.state.lines?.map((l) => l.text), reader: window.priceLens.reader().engine,
+  }));
+  console.log('  ', JSON.stringify(r));
+  check(r.prices[0]?.[0] === 1.19 && r.prices[0]?.[1] === 'EUR' && r.region?.x === 0 && r.region?.w === 900, 'slow start: the photo chosen while waiting is read whole, as €1.19 (not in the camera box, as pounds)');
   await browser.close();
 }
 

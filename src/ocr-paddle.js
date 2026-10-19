@@ -6,15 +6,20 @@
  * moves on, and every step of the reading must see the same picture. The worker is started once
  * and kept, so later reads skip the start-up.
  *
+ * A watchdog gives up on the worker when it has sent nothing for a while: progress while it
+ * starts, a sign of life after each step of a read. It counts only time the page was awake and
+ * visible, because a phone suspends a page in the background together with its worker.
+ *
  * Errors carry a `reason` ('unsupported', 'download', 'start', 'stalled', 'worker', 'timeout',
  * 'read') for src/reader.js, which decides what to do and what to tell people. */
 
 const WORKER = new URL('./paddle-worker.js', import.meta.url);
-const START_STALL_MS = 60000; // no word from the worker for this long while starting: it has hung
-const READ_MS = 20000;        // a read on a slow phone takes a few seconds; this long means it hung
+const START_STALL_MS = 60000; // nothing from the worker for this long while starting: it has hung
+const READ_MS = 20000;        // nothing from the worker for this long during a read: it has hung
+const LOOK_MS = 1000;         // how often the watchdog looks
 
 const settings = {}; // the worker's settings, changed by bench/ experiments
-let worker = null, starting = null, files = [], timing = null, nextId = 1, progress = () => {};
+let worker = null, starting = null, startWatch = null, files = [], timing = null, nextId = 1, progress = () => {};
 const pending = new Map();
 
 class ReaderError extends Error {
@@ -51,12 +56,31 @@ export const readerFiles = () => files.slice();
 /* How long its start took, in ms: { files, start } (for the benchmark) */
 export const readerTiming = () => timing;
 
+/* Calls onExpire once nothing has been heard from the worker (heard()) for `limit` ms of time the
+ * page was awake and visible. A plain timer would fire the moment a suspended page comes back,
+ * before the worker (suspended with it) could answer. So this looks once a second instead: a look
+ * that comes long after the one before, or finds the page hidden, means the page was asleep or in
+ * the background, and the worker gets its full time again. */
+export function watchdog(limit, onExpire, now = Date.now) {
+  let heard = now(), looked = heard;
+  const hidden = () => typeof document !== 'undefined' && document.hidden;
+  const timer = setInterval(() => {
+    const t = now();
+    if (hidden() || t - looked > 3 * LOOK_MS) heard = t;
+    looked = t;
+    if (t - heard >= limit) { clearInterval(timer); onExpire(); }
+  }, LOOK_MS);
+  return { heard: () => { heard = now(); }, clear: () => clearInterval(timer) };
+}
+
 /* Stops the worker; the next getReader() starts a new one. */
 export function stop(reason = 'worker', detail) {
   const err = new ReaderError(reason, detail);
   worker?.terminate();
   worker = null;
   starting = null;
+  startWatch?.clear();
+  startWatch = null;
   for (const p of pending.values()) p.reject(err);
   pending.clear();
   return err;
@@ -67,11 +91,7 @@ export function getReader(onProgress) {
   if (onProgress) progress = onProgress;
   if (!starting) {
     starting = new Promise((resolve, reject) => {
-      let stall = 0;
-      const watch = () => {
-        clearTimeout(stall);
-        stall = setTimeout(() => reject(stop('stalled', 'no answer while starting')), START_STALL_MS);
-      };
+      const stall = (startWatch = watchdog(START_STALL_MS, () => reject(stop('stalled', 'no answer while starting'))));
       try {
         worker = new Worker(WORKER, { type: 'module', name: 'price-lens-reader' });
       } catch (err) {
@@ -81,23 +101,22 @@ export function getReader(onProgress) {
         const msg = e.data || {};
         if (msg.id != null) {
           const p = pending.get(msg.id);
+          if (msg.type === 'working') return p?.heard();
           pending.delete(msg.id);
           if (msg.type === 'lines') p?.resolve(msg.lines);
           else p?.reject(stop('read', msg.detail));
           return;
         }
-        if (msg.type === 'progress') { watch(); progress(msg.p); }
-        else if (msg.type === 'ready') { clearTimeout(stall); files = msg.files || []; timing = msg.ms; resolve(); }
-        else if (msg.type === 'failed') { clearTimeout(stall); reject(stop(msg.reason || 'start', msg.detail)); }
+        if (msg.type === 'progress') { stall.heard(); progress(msg.p); }
+        else if (msg.type === 'ready') { stall.clear(); files = msg.files || []; timing = msg.ms; resolve(); }
+        else if (msg.type === 'failed') reject(stop(msg.reason || 'start', msg.detail));
       };
       /* the worker's script did not load, or something in it threw outside a read */
       worker.onerror = (e) => {
         e.preventDefault?.();
-        clearTimeout(stall);
         reject(stop('worker', e.message || 'error in the worker'));
       };
       worker.onmessageerror = () => reject(stop('worker', 'a message could not be read'));
-      watch();
       worker.postMessage({ type: 'start', settings });
     });
   }
@@ -130,10 +149,11 @@ export async function readLines(source, region) {
   if (!worker) throw new ReaderError('worker', 'stopped');
   const id = nextId++;
   const lines = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(stop('timeout', `no answer in ${READ_MS / 1000} s`)); }, READ_MS);
+    const watch = watchdog(READ_MS, () => { pending.delete(id); reject(stop('timeout', `no answer in ${READ_MS / 1000} s`)); });
     pending.set(id, {
-      resolve: (v) => { clearTimeout(timer); resolve(v); },
-      reject: (e) => { clearTimeout(timer); reject(e); },
+      heard: watch.heard,
+      resolve: (v) => { watch.clear(); resolve(v); },
+      reject: (e) => { watch.clear(); reject(e); },
     });
     worker.postMessage({ type: 'read', id, image }, [image instanceof ImageData ? image.data.buffer : image]);
   });

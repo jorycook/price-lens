@@ -4,21 +4,31 @@
  * but it needs more of the browser: module workers, OffscreenCanvas in workers, and WebAssembly
  * with SIMD. Some phones that have all of these still get it wrong (iOS 16.4 to 16.5.0 compute
  * SIMD wrongly and read garbage), so after it starts it reads a small picture of a known price
- * first. If anything fails (a missing feature, a download, the test, the worker, a read that
- * never finishes), Tesseract reads for the rest of the visit, and Settings says so.
+ * first. A browser that lacks a feature, or fails that test, gets Tesseract for the rest of the
+ * visit. A failure that may pass (a download, a worker that stopped or hung) gets Tesseract for
+ * now, and PaddleOCR is tried again on a later scan, after a pause that doubles each time. When
+ * neither can be loaded, nothing is settled, and the next scan starts over. Settings says which
+ * reader is in use, and why.
  *
  * Same getReader(onProgress) and readLines(source, region) as the readers themselves. */
 
 import * as paddle from './ocr-paddle.js';
 import * as tesseract from './ocr.js';
 
-/* what Settings shows: { engine: 'paddle' | 'tesseract' | null (not started yet), why } */
+/* what Settings shows: { engine: 'paddle' | 'tesseract' | null (none yet), why } */
 const status = { engine: null, why: null };
 const listeners = [];
-let choice = null;          // promise of the reader module in use
-let paddleFailed = false;   // once PaddleOCR fails, it is not tried again during this visit
+let choice = null;       // promise of the reader module in use
+let current = null;      // the module it settled on
+let blocked = null;      // why PaddleOCR is not tried again this visit: 'unsupported' | 'selftest'
+let retryAt = 0;         // after a failure that may pass, PaddleOCR is tried again from this time on
+let failures = 0;        // ...and the pause before that doubles with each one
+let fallbackWhy = null;  // what Settings says about the standard reader being in use
+let keptFallback = false;
 let progress = () => {};
 
+const RETRY_MS = 10000;          // the first pause: 10 s, then 20, 40, ... up to RETRY_MAX_MS
+const RETRY_MAX_MS = 10 * 60000;
 const SELF_TEST_KEY = 'price-lens:reader-test';
 
 function setStatus(engine, why = null) {
@@ -32,12 +42,16 @@ export function onReaderChange(fn) { listeners.push(fn); }
 /* One plain sentence for Settings. */
 export function readerNote() {
   if (status.engine === 'paddle') return 'Text reader: PaddleOCR, running on this phone.';
-  if (status.engine !== 'tesseract') return status.why === 'starting' ? 'Text reader: getting ready…' : 'Text reader: starts with the first scan.';
-  const why = {
-    download: 'the better reader could not be downloaded; it will try again next time you open Price Lens',
-    stopped: 'the better reader stopped working; it will try again next time you open Price Lens',
-  }[status.why] || 'the better reader could not start on this phone';
-  return `Text reader: standard (${why}).`;
+  if (status.engine === 'tesseract') {
+    const why = {
+      download: 'the better reader could not be downloaded; it will be tried again later',
+      stopped: 'the better reader stopped working; it will be tried again later',
+    }[status.why] || 'the better reader could not start on this phone';
+    return `Text reader: standard (${why}).`;
+  }
+  if (status.why === 'starting') return 'Text reader: getting ready…';
+  if (status.why === 'failed') return 'Text reader: none yet; it could not be downloaded. Check the connection and scan again.';
+  return 'Text reader: starts with the first scan.';
 }
 
 export const readerInfo = () => ({ ...status, files: status.engine === 'paddle' ? paddle.readerFiles() : tesseract.readerFiles() });
@@ -47,6 +61,15 @@ export const readerInfo = () => ({ ...status, files: status.engine === 'paddle' 
 function keepOffline(urls) {
   if (!('serviceWorker' in navigator) || !urls.length) return;
   navigator.serviceWorker.ready.then((reg) => reg.active?.postMessage({ type: 'keep', urls })).catch(() => {});
+}
+
+/* Once PaddleOCR reads, the standard reader's files are kept too (4.4 MB, once), so that it is
+   on the phone should PaddleOCR ever fail with no connection; not where the browser asks for
+   less data, and only after the first picture has been read. */
+function keepFallbackOffline() {
+  if (keptFallback || navigator.connection?.saveData) return;
+  keptFallback = true;
+  setTimeout(() => keepOffline(tesseract.readerFiles()), 5000);
 }
 
 /* A small picture of a known price, drawn here: if PaddleOCR cannot read this, it cannot be trusted. */
@@ -72,13 +95,27 @@ async function selfTest() {
 const failedTestHere = () => { try { return localStorage.getItem(SELF_TEST_KEY) === navigator.userAgent; } catch { return false; } };
 const rememberFailedTest = () => { try { localStorage.setItem(SELF_TEST_KEY, navigator.userAgent); } catch {} };
 
+/* Whether PaddleOCR should be tried now. */
+const paddleWanted = () => !blocked && Date.now() >= retryAt;
+
+/* Notes that PaddleOCR failed, and returns what Settings says about the standard reader taking over. */
+function paddleFailed(reason) {
+  if (reason === 'selftest') rememberFailedTest();
+  if (reason === 'unsupported' || reason === 'selftest') { blocked = reason; return (fallbackWhy = 'unsupported'); }
+  failures++;
+  retryAt = Date.now() + Math.min(RETRY_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+  return (fallbackWhy = reason === 'download' || reason === 'stalled' ? 'download' : 'stopped');
+}
+
 async function useTesseract(why) {
-  paddleFailed = true;
   setStatus('tesseract', why);
   try {
     await tesseract.getReader((p) => progress(p));
   } catch (err) {
     console.warn('text reader:', err);
+    /* neither reader: nothing is settled, and the next scan starts over with PaddleOCR */
+    retryAt = 0;
+    setStatus(null, 'failed');
     throw Object.assign(new Error('The text reader could not be downloaded. Check the connection and try again.'), { plain: true });
   }
   keepOffline(tesseract.readerFiles());
@@ -86,8 +123,8 @@ async function useTesseract(why) {
 }
 
 async function choose() {
-  if (paddleFailed) return useTesseract(status.why);
-  if (!paddle.canStart() || failedTestHere()) return useTesseract('unsupported');
+  if (!paddleWanted()) return useTesseract(fallbackWhy);
+  if (!paddle.canStart() || failedTestHere()) return useTesseract(paddleFailed('unsupported'));
   setStatus(null, 'starting');
   try {
     await paddle.getReader((p) => progress(p));
@@ -95,18 +132,22 @@ async function choose() {
   } catch (err) {
     console.warn('PaddleOCR could not start; using Tesseract:', err);
     paddle.stop();
-    if (err.reason === 'selftest') rememberFailedTest();
-    return useTesseract(err.reason === 'download' || err.reason === 'stalled' ? 'download' : 'unsupported');
+    return useTesseract(paddleFailed(err.reason));
   }
   setStatus('paddle');
   keepOffline(paddle.readerFiles());
   return paddle;
 }
 
-/* Starts the reader once; later calls get the same one. onProgress(0..1) reports the download. */
+/* Starts the reader once; later calls get the same one, until PaddleOCR is due another try.
+   onProgress(0..1) reports a download. */
 export function getReader(onProgress) {
   if (onProgress) progress = onProgress;
-  if (!choice) choice = choose().catch((err) => { choice = null; throw err; });
+  if (choice && current === tesseract && paddleWanted()) choice = null;
+  if (!choice) {
+    current = null;
+    choice = choose().then((m) => (current = m), (err) => { choice = null; throw err; });
+  }
   return choice;
 }
 
@@ -115,12 +156,17 @@ export async function readLines(source, region) {
   const reader = await getReader();
   if (reader !== paddle) return reader.readLines(source, region);
   try {
-    return await paddle.readLines(source, region);
+    const lines = await paddle.readLines(source, region);
+    keepFallbackOffline();
+    return lines;
   } catch (err) {
-    /* a read failed or never finished: the standard reader from now on, starting with this picture */
+    /* a read failed or never finished: this picture goes to the standard reader, and PaddleOCR
+       gets another try later */
     console.warn('PaddleOCR stopped; using Tesseract:', err);
     paddle.stop();
-    choice = useTesseract('stopped').catch((e) => { choice = null; throw e; });
+    const why = paddleFailed(err.reason);
+    current = null;
+    choice = useTesseract(why).then((m) => (current = m), (e) => { choice = null; throw e; });
     return (await choice).readLines(source, region);
   }
 }

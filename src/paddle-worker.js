@@ -16,7 +16,7 @@
  *
  * Messages in:  { type: 'start', settings }, { type: 'read', id, image }, { type: 'configure', settings }
  * Messages out: { type: 'progress', p }, { type: 'ready', files, ms }, { type: 'failed', reason, detail },
- *               { type: 'lines', id, lines }, { type: 'failed', id, detail }
+ *               { type: 'working', id } after each step of a read, { type: 'lines', id, lines }, { type: 'failed', id, detail }
  * `detail` is for the console only; the page words what people see. */
 
 import {
@@ -279,7 +279,8 @@ function crop(src, b) {
   return ctx.getImageData(0, 0, W, H);
 }
 
-/* Several crops as one input, padded on the right to the same width with grey (0 after normalising). */
+/* Several crops as one input, padded on the right to the same width with grey (0 after normalising).
+ * The part of a crop that reached past the snapshot is transparent (see crop); it is padding too. */
 function recognitionInput(crops, width) {
   const H = CROP_H, plane = H * width;
   const data = new Float32Array(crops.length * 3 * plane);
@@ -288,6 +289,7 @@ function recognitionInput(crops, width) {
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < img.width; x++) {
         const i = (y * img.width + x) * 4, o = y * width + x;
+        if (!px[i + 3]) continue;
         data[base + o] = px[i + 2] / 127.5 - 1;
         data[base + plane + o] = px[i + 1] / 127.5 - 1;
         data[base + 2 * plane + o] = px[i] / 127.5 - 1;
@@ -297,8 +299,9 @@ function recognitionInput(crops, width) {
   return data;
 }
 
-/* Reads the crops, a few at a time; the shortest go together so little is padding. */
-async function recognize(crops) {
+/* Reads the crops, a few at a time; the shortest go together so little is padding. tick() is
+ * called after each batch: a sign of life for the page's watchdog. */
+async function recognize(crops, tick = () => {}) {
   const { ort, rec, dict } = reader;
   const order = crops.map((c, i) => i).sort((a, b) => crops[a].width - crops[b].width);
   const results = new Array(crops.length);
@@ -313,6 +316,7 @@ async function recognize(crops) {
       results[i] = decode(p.data, steps, classes, k * steps * classes, dict);
       results[i].stride = width / steps; // crop pixels per step
     });
+    tick();
   }
   return results;
 }
@@ -337,9 +341,11 @@ async function upsideDown(crops) {
   return out;
 }
 
-/* Reads the snapshot and returns its lines: { text, height, confidence, bbox } in snapshot pixels. */
-async function readLines(src) {
+/* Reads the snapshot and returns its lines: { text, height, confidence, bbox } in snapshot pixels.
+ * tick() is called after each step, so the page knows the worker is alive. */
+async function readLines(src, tick = () => {}) {
   let boxes = await detect(src);
+  tick();
   if (!boxes.length) return [];
   /* A box much taller than long is either one tall letter ("1") or a line of text running up or
      down the picture. Read it all three ways and keep the reading the recogniser is surest of. */
@@ -351,8 +357,9 @@ async function readLines(src) {
     const flip = await upsideDown(crops);
     all = all.map((b, i) => (flip[i] ? flipped(b) : b));
     crops = crops.map((c, i) => (flip[i] ? crop(src, all[i]) : c));
+    tick();
   }
-  const read = await recognize(crops);
+  const read = await recognize(crops, tick);
   tall.forEach((j, k) => {
     for (const i of [boxes.length + 2 * k, boxes.length + 2 * k + 1]) {
       if (read[i].chars.length && read[i].confidence > read[j].confidence) { all[j] = all[i]; crops[j] = crops[i]; read[j] = read[i]; }
@@ -376,9 +383,11 @@ async function readLines(src) {
 }
 
 async function read({ id, image }) {
+  const tick = () => post({ type: 'working', id });
   try {
     if (!reader) throw new Error('the reader has not started');
-    const lines = await readLines(sourceOf(image));
+    tick();
+    const lines = await readLines(sourceOf(image), tick);
     post({ type: 'lines', id, lines });
   } catch (err) {
     image?.close?.();

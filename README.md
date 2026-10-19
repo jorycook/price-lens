@@ -8,10 +8,10 @@ It's a web app with no build step. Open it in Safari or Chrome on a phone and ad
 
 1. **Camera.** The back camera fills the screen and you aim the box at a price. **Scan** freezes the frame and reads it. **Live** keeps reading while you move the phone, and labels each price in place. **Photo** reads a picture you already have. **Type** converts a price you type in.
 2. **Reading the text** (`src/reader.js`). [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s PP-OCRv6 tiny models run on the phone, in [ONNX Runtime Web](https://onnxruntime.ai) compiled to WebAssembly, so pictures never leave the device. One small neural network finds the lines of text in the picture; a second reads each line. They were trained on photos of signs, shelves and packaging, so they read price tags at an angle, in odd light or on coloured card far better than a reader made for scanned pages (see [Measuring](#measuring)).
-   - The first scan downloads the reader: about 8.4 MB (19 MB once unpacked), with a progress figure on screen. After that it's stored on the phone, and works offline.
-   - It reads in a background worker, so the screen keeps responding. A picture takes about half a second on a computer; phones are slower.
+   - The first scan downloads the reader: about 8.4 MB (19 MB once unpacked), with a progress figure on screen. After that it's stored on the phone, and works offline. A scan tapped before it's ready waits for it, with the progress still showing; a photo chosen meanwhile is read instead.
+   - It reads in a background worker, so the screen keeps responding. A picture takes about half a second on a computer; phones are slower. The app gives up on a read only when the worker has given no sign of life for 20 s while the app was on screen (a minute, while it starts): time spent in another app doesn't count, since the phone suspends the page and its worker together.
    - It needs a recent browser: Safari 16.4 or later on an iPhone, a recent Chrome on Android. When it starts, it first reads a small picture of a known price, because some phones get the sums wrong (iOS 16.4 to 16.5.0 read garbage).
-   - Where it can't start, can't be downloaded, fails that test or stops responding, [Tesseract](https://github.com/naptha/tesseract.js) reads instead, for the rest of the visit (about 4.4 MB, also stored on the phone). Settings then shows *Text reader: standard*, and why.
+   - Where it can't start or fails that test, [Tesseract](https://github.com/naptha/tesseract.js) reads instead, for the rest of the visit (about 4.4 MB, also stored on the phone). When it can't be downloaded or stops answering, Tesseract reads for now and PaddleOCR is tried again on a later scan, after a pause that doubles each time (10 s, 20 s, …). When neither can be downloaded, the hint says so, and the next scan starts over. Settings shows which reader is in use, and why. Once PaddleOCR has read a picture, Tesseract's files are stored too (unless the browser asks for less data), so a reader is on the phone even if PaddleOCR later fails offline.
 3. **Finding the price** (`src/prices.js`). This step handles:
    - currency signs before or after the number (`€12,50`, `12.50 CHF`, `1,980円`, `R$ 49,90`, `49:-`), plus ISO codes
    - thousands and decimal separators in every local style: `1,234.56`, `1.234,56`, `1 234,56`, `12'500`, `12,-`
@@ -74,7 +74,7 @@ npm test            # price reading (separators, signs, things that aren't price
 npm run e2e         # needs Playwright + Chromium and a connection
 ```
 
-The end-to-end test also checks that the page never stops responding for 200 ms while the reader starts and reads, that the app falls back to Tesseract when PaddleOCR's files are blocked, and that after one visit it still reads with the network cut.
+The end-to-end test also checks that the page never stops responding for 200 ms while the reader starts and reads; that with no connection the hint says so, that the app falls back to Tesseract when PaddleOCR's files are blocked and brings PaddleOCR back a minute later; that after one visit it still reads with the network cut; that the page's clock jumping a minute (the app switched away from) during the download or a read doesn't switch the reader; that Scan tapped during a slow download keeps the progress on screen and a photo chosen meanwhile is read whole; and that no labels of a frozen frame float over the live picture after coming back from the background.
 
 ## Measuring
 
@@ -95,7 +95,7 @@ The numbers so far, in headless Chromium on a 4-core computer. *Right*: the firs
 | | PaddleOCR (default) | Tesseract (fallback) |
 |---|---|---|
 | 120 made-up tags, seed 1 | 98% right, 0.05 wrong | 54% right, 0.17 wrong |
-| 120 made-up tags, seed 2 | 98% right, 0.07 wrong | 53% right, 0.26 wrong |
+| 120 made-up tags, seed 2 | 98% right, 0.05 wrong | 53% right, 0.26 wrong |
 | 33 real photos (decision half) | 20 right, 0.48 wrong | 4 right, 0.24 wrong |
 | 33 real photos (held-back half) | 16 right, 0.48 wrong | 6 right, 0.27 wrong |
 
@@ -105,7 +105,7 @@ A read took 0.4 to 0.7 s with either reader. In WebKit (Safari's engine), Paddle
 
 - PaddleOCR's tiny model reads Latin letters with their accents, Greek, Chinese, digits and the signs € £ $ ¥ ₹ ₩ ₽ ₺ ₪ ₫ ₱. It has no Cyrillic, Japanese kana, Korean, Thai or Arabic letters, and no 円. Digits next to those scripts usually are read, and the tag-currency setting fills in the currency. The standard reader (Tesseract) reads only Latin letters, digits and € £ $ ¥.
 - A tag held upside down is misread. Text turned on its side is read.
-- On iPhones with iOS 16.4 to 17, opening and closing the app many times can leave too little memory for PaddleOCR to start (a WebKit bug with WebAssembly memory). The app then uses the standard reader until it is opened again.
+- On iPhones with iOS 16.4 to 17, opening and closing the app many times can leave too little memory for PaddleOCR to start (a WebKit bug with WebAssembly memory). The app then uses the standard reader, and tries PaddleOCR again on a later scan.
 - Small, curved, glossy or blurry tags read poorly. Move closer so the price fills the box, and avoid glare.
 - Cents printed small and raised (4⁹⁹) may come out as 499, or as 4° (then no price is shown). Check against the original amount, which is always shown under the converted price.
 

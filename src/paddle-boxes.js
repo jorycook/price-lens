@@ -220,25 +220,34 @@ export function decode(probs, steps, classes, offset, dict) {
 /* ---------- the ink in a crop: letter height, and cents printed small and raised ---------- */
 
 /* Which pixels of a crop ({ width, height, data } as RGBA) are ink: Otsu's threshold on
- * brightness, and ink is whichever side the crop's border is not (dark on light or light on dark). */
+ * brightness, and ink is whichever side the crop's border is not (dark on light or light on dark).
+ * Transparent pixels are where the box reached past the picture; they are neither, and count for
+ * nothing (read as black, they would pass for ink on a light tag and stretch the letters). */
 export function inkMask(img) {
   const { width: W, height: H, data } = img;
-  const g = new Uint8Array(W * H), hist = new Uint32Array(256);
-  for (let i = 0; i < W * H; i++) { g[i] = (data[i * 4] * 299 + data[i * 4 + 1] * 587 + data[i * 4 + 2] * 114) / 1000; hist[g[i]]++; }
+  const g = new Uint8Array(W * H), seen = new Uint8Array(W * H), hist = new Uint32Array(256);
+  let count = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (!data[i * 4 + 3]) continue;
+    g[i] = (data[i * 4] * 299 + data[i * 4 + 1] * 587 + data[i * 4 + 2] * 114) / 1000;
+    seen[i] = 1; hist[g[i]]++; count++;
+  }
   let total = 0, best = 0, cut = 128, w0 = 0, s0 = 0;
   for (let v = 0; v < 256; v++) total += v * hist[v];
   for (let v = 0; v < 256; v++) {
     w0 += hist[v]; s0 += v * hist[v];
-    const w1 = W * H - w0;
+    const w1 = count - w0;
     if (!w0 || !w1) continue;
     const between = w0 * w1 * (s0 / w0 - (total - s0) / w1) ** 2;
     if (between > best) { best = between; cut = v; }
   }
   let dark = 0, n = 0;
-  for (let x = 0; x < W; x++) { dark += (g[x] <= cut) + (g[(H - 1) * W + x] <= cut); n += 2; }
+  for (let x = 0; x < W; x++) {
+    for (const i of [x, (H - 1) * W + x]) if (seen[i]) { dark += g[i] <= cut; n++; }
+  }
   const inkIsDark = dark < n / 2;
   const mask = new Uint8Array(W * H);
-  for (let i = 0; i < W * H; i++) mask[i] = (g[i] <= cut) === inkIsDark;
+  for (let i = 0; i < W * H; i++) mask[i] = seen[i] && (g[i] <= cut) === inkIsDark;
   return mask;
 }
 
