@@ -233,8 +233,11 @@ if (want(2)) {
   await page.waitForFunction(() => window.priceLens.state.table, null, { timeout: 20000 });
   /* wait for the reader before scanning, as a person would see "ready" */
   await page.waitForFunction(() => !/ready/.test(document.getElementById('hint').textContent), null, { timeout: 60000 });
+  const liveAtStart = await page.evaluate(() => ({ live: window.priceLens.state.live, pressed: document.getElementById('live-btn').getAttribute('aria-pressed'), shutter: document.getElementById('shutter-label').textContent }));
+  check(liveAtStart.live && liveAtStart.pressed === 'true' && liveAtStart.shutter === 'Scan', `live: on by itself once the camera starts (${JSON.stringify(liveAtStart)})`);
+  /* Scan holds the sharpest frame and reads it */
   await page.click('#shutter');
-  await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 90000 }).catch(() => {});
+  await page.waitForFunction(() => window.priceLens.state.frozen && !window.priceLens.state.live && !window.priceLens.state.busy && !window.priceLens.state.waiting, null, { timeout: 90000 }).catch(() => {});
   await page.waitForTimeout(400);
   const r = await page.evaluate(() => ({
     lines: window.priceLens.state.lines.map((l) => l.text),
@@ -244,7 +247,7 @@ if (want(2)) {
     hint: document.getElementById('hint').textContent,
   }));
   console.log('  ', JSON.stringify(r));
-  check(r.prices[0]?.[0] === 3.49 && r.prices[0]?.[1] === 'GBP', 'camera: reads £3.49 as the main price');
+  check(r.prices[0]?.[0] === 3.49 && r.prices[0]?.[1] === 'GBP', 'camera: Scan holds the frame and reads £3.49 as the main price');
   check(/[¥￥]\s?[\d,]+$/.test(r.converted), 'camera: shows it in yen');
   check(r.tagPill === 'Tag · GB GBP', 'camera: knows from the time zone that tags here are in pounds');
   check(!r.prices.some(([a]) => [12, 4471, 30].includes(a)), 'camera: aisle, item and "save 30" numbers are not prices');
@@ -268,9 +271,9 @@ if (want(2)) {
   console.log('   sharpness (sharp, slightly blurred, blurred):', ranks.map(Math.round).join(', '));
   check(ranks[0] > ranks[1] && ranks[1] > ranks[2], 'camera: the sharpness score ranks sharp > slightly blurred > blurred');
 
-  /* live mode keeps reading */
-  await page.click('#shutter'); // back to the moving picture
-  await page.click('#live-btn');
+  /* Again: back to the moving picture, and live reading goes on by itself */
+  await page.click('#shutter');
+  await page.waitForFunction(() => window.priceLens.state.live && !window.priceLens.state.frozen, null, { timeout: 10000 });
   await page.evaluate(() => { window.priceLens.state.prices = []; window.priceLens.state.pickKey = null; });
   await page.waitForFunction(() => window.priceLens.state.prices.length > 0, null, { timeout: 60000 }).catch(() => {});
   /* then watch the big price for a few seconds: it should stay put */
@@ -280,14 +283,12 @@ if (want(2)) {
     await page.waitForTimeout(400);
   }
   console.log('   live:', [...new Set(shown)].join(' | '));
-  check(shown[0].startsWith('£3.49'), 'live: reads the price on its own');
+  check(shown[0].startsWith('£3.49'), 'live: goes on by itself after Again and reads the price on its own');
   check(new Set(shown).size === 1, 'live: the price shown stays steady over 5 seconds');
 
   /* Scan, then leave the app and come back: the camera restarts, and the labels of the frozen
      frame must not float over the moving picture */
-  await page.click('#shutter'); // stop live mode
-  await page.waitForFunction(() => !window.priceLens.state.live && !window.priceLens.state.busy, null, { timeout: 10000 });
-  await page.click('#shutter'); // scan
+  await page.click('#shutter'); // Scan, from live: holds the frame
   await page.waitForFunction(() => window.priceLens.state.frozen && !window.priceLens.state.busy && document.querySelectorAll('#labels .tag').length > 0, null, { timeout: 30000 });
   await page.evaluate(hidePage, true);
   await page.evaluate(hidePage, false);
@@ -295,6 +296,22 @@ if (want(2)) {
   await page.waitForTimeout(800);
   const back = await page.evaluate(() => ({ frozen: window.priceLens.state.frozen, labels: document.querySelectorAll('#labels .tag').length, shutter: document.getElementById('shutter-label').textContent }));
   check(!back.frozen && back.labels === 0 && back.shutter === 'Scan', `camera: back from the background, no labels of the old frame float over the live picture (${JSON.stringify(back)})`);
+  await page.waitForFunction(() => window.priceLens.state.live, null, { timeout: 10000 }).catch(() => {});
+  check(await page.evaluate(() => window.priceLens.state.live), 'live: goes on again after coming back from the background');
+
+  /* the Live button turns continuous reading off, and the choice outlives a reload */
+  await page.click('#live-btn');
+  await page.waitForFunction(() => !window.priceLens.state.live && !window.priceLens.state.busy, null, { timeout: 10000 });
+  const off = await page.evaluate(() => ({ live: window.priceLens.state.live, pressed: document.getElementById('live-btn').getAttribute('aria-pressed'), hint: document.getElementById('hint').textContent, saved: JSON.parse(localStorage.getItem('price-lens:settings')).live }));
+  check(!off.live && off.pressed === 'false' && off.saved === false && /tap Scan/.test(off.hint), `live: the Live button turns it off and the hint says to tap Scan (${JSON.stringify(off)})`);
+  await page.reload();
+  await page.waitForFunction(() => window.priceLens && document.getElementById('video').videoWidth > 0, null, { timeout: 20000 });
+  await page.waitForTimeout(1500);
+  const afterReload = await page.evaluate(() => ({ live: window.priceLens.state.live, pressed: document.getElementById('live-btn').getAttribute('aria-pressed') }));
+  check(!afterReload.live && afterReload.pressed === 'false', `live: off stays off after a reload (${JSON.stringify(afterReload)})`);
+  await page.click('#live-btn');
+  await page.waitForFunction(() => window.priceLens.state.live, null, { timeout: 10000 }).catch(() => {});
+  check(await page.evaluate(() => window.priceLens.state.live), 'live: the Live button turns it back on');
   await browser.close();
 }
 

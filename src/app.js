@@ -25,7 +25,7 @@ const SETTINGS_KEY = 'price-lens:settings';
 const lang = navigator.language || 'en-US';
 const guess = currencyForLanguage(lang) || 'USD';
 const settings = Object.assign(
-  { to: guess, from: 'auto' },
+  { to: guess, from: 'auto', live: true },
   (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } })(),
 );
 delete settings.learned; // from an earlier version, which guessed the tag currency from the tags themselves
@@ -144,6 +144,8 @@ async function startCamera() {
     unfreeze();
     setHint(AIM_HINT);
     warmUp();
+    /* reading starts by itself, unless the person turned Live off */
+    if (settings.live) setLive(true);
     /* zoom in (2× unless the person chose otherwise), so the tag is read from beyond the lens's
        closest focus; constraints go on once the video is playing */
     await tuneTrack(state.track, { zoom: settings.zoom ?? 2 });
@@ -173,6 +175,9 @@ function stopCamera() {
 }
 
 const AIM_HINT = 'Aim the box at a price, about 25 cm away, then tap Scan';
+const LIVE_HINT = 'Aim the box at a price, about 25 cm away. Tap Scan to hold one.';
+/* what to do next, when nothing is being read */
+const idleHint = () => (state.live ? LIVE_HINT : AIM_HINT);
 const zoomText = (z) => `${Math.round(z * 10) / 10}×`;
 
 /* the zoom and flashlight buttons, shown only when this camera has them */
@@ -203,7 +208,7 @@ const readerProgress = (p) => { if (p < 1) setHint(`${READY_HINT} ${Math.round(p
 /* the reader takes a few seconds to load the first time; start it while the person aims */
 function warmUp() {
   getReader(readerProgress).then(() => {
-    if (!state.busy && !state.waiting && !state.prices.length) setHint(state.photo ? '' : AIM_HINT);
+    if (!state.busy && !state.waiting && !state.prices.length) setHint(state.photo ? '' : idleHint());
   }).catch((err) => setHint(plainError(err, READER_FAILED)));
 }
 
@@ -361,17 +366,20 @@ function rereadLast() {
 }
 
 /* The Scan button: let the shake of the tap settle, keep the sharpest frame of a short burst,
-   show it as a still and read it. The button is free again as soon as the still is up: while the
-   reader is still downloading, Again drops the scan. */
+   show it as a still and read it. In live mode this holds the picture, so the labels stand still
+   and can be tapped; Again lets live mode go on. The button is free again as soon as the still is
+   up: while the reader is still downloading, Again drops the scan. */
 async function shoot() {
-  if (state.busy || state.shooting || !el.video.videoWidth) return;
+  if (state.shooting || !el.video.videoWidth) return;
   state.shooting = true;
   el.shutter.disabled = true;
   el.reticle.classList.add('busy');
   setHint('Hold still…');
   try {
+    if (state.live) setLive(false); // the loop stops after the read it is on; the still is read on its own
     const shot = await captureSharpest(el.video, videoBox);
-    if (!state.stream || state.live) return;
+    await state.reading; // a live read still in flight finishes first
+    if (!state.stream) return;
     freezeFrame(shot.canvas);
     updateShutter();
   } finally {
@@ -393,7 +401,7 @@ async function liveLoop() {
   /* on a first visit the reader may still be downloading; frames are worth taking once it is ready */
   if (!(await awaitReader())) { if (run === state.liveRun && state.live) setLive(false); return; }
   if (!state.live || run !== state.liveRun) return;
-  if (!state.prices.length) setHint('Reading continuously…');
+  if (!state.prices.length) setHint(LIVE_HINT);
   let misses = 0;
   state.gate?.stop();
   const gate = (state.gate = frameGate(el.video, videoBox, (steady) => el.reticle.classList.toggle('steady', steady)));
@@ -413,13 +421,15 @@ async function liveLoop() {
   }
 }
 
+/* Starts or stops reading the moving picture. The Live button shows the person's choice
+   (settings.live), which outlives a held still, a photo or a trip to another app. */
 async function setLive(on) {
   state.live = on;
   state.history = [];
-  el.liveBtn.setAttribute('aria-pressed', String(on));
+  el.liveBtn.setAttribute('aria-pressed', String(settings.live));
   if (on) {
     unfreeze();
-    setHint('Reading continuously…');
+    setHint(LIVE_HINT);
     try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
     liveLoop();
   } else {
@@ -431,7 +441,13 @@ async function setLive(on) {
 
 function updateShutter() {
   el.shutter.classList.toggle('live', state.live);
-  el.shutterLabel.textContent = state.live ? 'Stop' : state.frozen ? 'Again' : 'Scan';
+  el.shutterLabel.textContent = state.frozen ? 'Again' : 'Scan';
+}
+
+/* after a held still or a photo: back to live reading, if that is on */
+function resumeLive() {
+  if (settings.live && state.stream) setLive(true);
+  else setHint(AIM_HINT);
 }
 
 /* ---------- photos ---------- */
@@ -672,18 +688,27 @@ function typed() {
 
 $('start-btn').addEventListener('click', startCamera);
 el.shutter.addEventListener('click', () => {
-  if (state.live) return setLive(false);
   if (state.frozen) {
-    if (state.stream) { unfreeze(); setHint(AIM_HINT); }
+    if (state.stream) { unfreeze(); resumeLive(); }
     else $('photo-input').click();
     return;
   }
   if (!state.stream) return $('photo-input').click();
   shoot();
 });
-el.liveBtn.addEventListener('click', () => {
-  if (!state.stream) return startCamera().then(() => state.stream && setLive(true));
-  setLive(!state.live);
+/* the Live button is a choice that is remembered: off, the camera waits for Scan */
+el.liveBtn.addEventListener('click', async () => {
+  settings.live = !settings.live;
+  saveSettings();
+  el.liveBtn.setAttribute('aria-pressed', String(settings.live));
+  if (!state.stream) return startCamera(); // live starts by itself when it is on
+  if (settings.live) return setLive(true);
+  setLive(false);
+  await state.reading; // the read the loop was on finishes (and would otherwise overwrite the hint)
+  if (!settings.live && !state.frozen) {
+    el.labels.replaceChildren(); // labels of a moving picture no longer being read
+    setHint(AIM_HINT);
+  }
 });
 for (const id of ['photo-input', 'photo-input-2']) {
   $(id).addEventListener('change', (e) => { usePhoto(e.target.files[0]).catch((err) => setHint(plainError(err, 'That picture could not be opened.'))); e.target.value = ''; });
@@ -698,8 +723,8 @@ onReaderChange((note) => {
   el.readerLine.textContent = note;
   if (!el.hint.textContent.startsWith(READY_HINT)) return;
   if (!readerInfo().engine) setHint(READY_HINT);
-  else if (state.busy) setHint(state.live ? (state.prices.length ? '' : 'Reading continuously…') : 'Reading…');
-  else if (!state.waiting) setHint(state.prices.length || state.photo ? '' : AIM_HINT);
+  else if (state.busy) setHint(state.live ? (state.prices.length ? '' : LIVE_HINT) : 'Reading…');
+  else if (!state.waiting) setHint(state.prices.length || state.photo ? '' : idleHint());
 });
 $('settings-btn').addEventListener('click', openSettings);
 $('to-btn').addEventListener('click', () => { openSettings(); el.toSelect.focus(); });
@@ -778,4 +803,5 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 }
 
 /* for the tests */
+el.liveBtn.setAttribute('aria-pressed', String(settings.live));
 window.priceLens = { state, settings, place, scan, usePhoto, reader: readerInfo };
